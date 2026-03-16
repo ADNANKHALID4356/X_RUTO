@@ -3,4 +3,8 @@
 const routeOrdersMap = new Map();
 const orderStatusMap = new Map();
 
-module.exports = { routeOrdersMap, orderStatusMap };
+// In-memory order store used when Supabase is not configured (demo / dev mode).
+// Key: order id (string), Value: order object
+const inMemoryOrders = new Map();
+
+module.exports = { routeOrdersMap, orderStatusMap, inMemoryOrders };

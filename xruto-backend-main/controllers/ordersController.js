@@ -1,5 +1,5 @@
-﻿const { getSupabase } = require('../config/supabase');
-const { routeOrdersMap, orderStatusMap } = require('../state/routeState');
+const { getSupabase } = require('../config/supabase');
+const { routeOrdersMap, orderStatusMap, inMemoryOrders } = require('../state/routeState');
 const {
   performKMeansClustering,
   generateNavigationURL,
@@ -48,8 +48,18 @@ const ordersController = {
         }
       }
 
-      // Mock fallback handled by empty response
-      res.json({ success: true, orders: [], postcode_options: [], total_orders: 0, date });
+      // Mock fallback: return orders from in-memory store that match the date
+      const allOrders = Array.from(inMemoryOrders.values()).filter(
+        o => (!o.delivery_date || o.delivery_date === date) &&
+             ['pending', 'confirmed', 'assigned', 'in_route', 'clustered'].includes(o.status)
+      );
+      const processedOrders = allOrders.map(order => ({
+        ...order,
+        postcode_area: (order.postcode || '').split(' ')[0],
+        distance_from_depot_km: calculateDistanceFromDepot(order.latitude, order.longitude)
+      }));
+      const postcodeOptions = [...new Set(processedOrders.map(o => o.postcode_area))].sort();
+      res.json({ success: true, orders: processedOrders, postcode_options: postcodeOptions, total_orders: processedOrders.length, date });
     } catch (error) {
       console.error('Get eligible orders error:', error);
       res.status(500).json({ success: false, message: 'Failed to fetch eligible orders', error: error.message });
@@ -106,23 +116,32 @@ const ordersController = {
         }
       }
 
-      // Mock clustering
-      const mockOrders = [
+      // Demo fallback: use the in-memory order store
+      const allOrders = Array.from(inMemoryOrders.values()).filter(
+        o => selected_postcodes.some(pc => (o.postcode || '').startsWith(pc)) &&
+             ['pending', 'confirmed', 'assigned', 'in_route', 'clustered'].includes(o.status)
+      ).map(order => ({
+        ...order,
+        postcode_area: (order.postcode || '').split(' ')[0],
+        distance_from_depot_km: calculateDistanceFromDepot(order.latitude, order.longitude)
+      }));
+
+      const ordersToCluster = allOrders.length > 0 ? allOrders : [
         { id: '1', customer_name: 'John Smith', delivery_address: '123 Queens Road, Brighton', postcode: 'BN1 1AA', postcode_area: 'BN1', order_value: 45.99, weight: 2.5, special_instructions: 'Ring doorbell twice' },
         { id: '2', customer_name: 'Sarah Wilson', delivery_address: '456 Western Road, Brighton', postcode: 'BN1 2BB', postcode_area: 'BN1', order_value: 78.50, weight: 3.2, special_instructions: null },
         { id: '3', customer_name: 'Mike Johnson', delivery_address: '789 North Street, Brighton', postcode: 'BN1 1YZ', postcode_area: 'BN1', order_value: 67.80, weight: 3.5, special_instructions: 'Leave with neighbor if out' },
         { id: '4', customer_name: 'Emma Brown', delivery_address: '12 Elm Grove, Brighton', postcode: 'BN2 3DE', postcode_area: 'BN2', order_value: 28.75, weight: 1.5, special_instructions: 'Fragile items' }
       ].filter(order => selected_postcodes.includes(order.postcode_area));
 
-      const zones = performKMeansClustering(mockOrders, max_zones);
+      const zones = performKMeansClustering(ordersToCluster, max_zones);
 
       res.json({
         success: true,
         zones,
-        total_orders: mockOrders.length,
-        clustering_method: 'mock_kmeans',
+        total_orders: ordersToCluster.length,
+        clustering_method: 'kmeans',
         optimization_score: 88,
-        message: 'Successfully clustered ' + mockOrders.length + ' orders into ' + zones.length + ' zones (demo mode)'
+        message: 'Successfully clustered ' + ordersToCluster.length + ' orders into ' + zones.length + ' zones (demo mode)'
       });
     } catch (error) {
       console.error('Generate clusters error:', error);
@@ -832,6 +851,13 @@ const ordersController = {
         });
       }
 
+      // No Supabase — save to in-memory store so getEligibleOrders can serve them
+      validOrders.forEach((order, idx) => {
+        const id = 'mem_' + Date.now() + '_' + idx;
+        inMemoryOrders.set(id, { ...order, id });
+        orderStatusMap.set(id, 'pending');
+      });
+
       res.json({
         success: true,
         message: 'Successfully processed ' + validOrders.length + ' orders (database not configured)',
@@ -872,6 +898,7 @@ const ordersController = {
 
       routeOrdersMap.clear();
       orderStatusMap.clear();
+      inMemoryOrders.clear();
       res.json({ success: true, message: 'Orders reset completed (database not configured)', deletedCount: 0 });
     } catch (error) {
       console.error('Reset orders error:', error);
