@@ -22,6 +22,7 @@ class WooCommerceService {
 
     this.stores.set(storeId, {
       storeId,
+      name: credentials.name || storeId,
       baseUrl,
       consumerKey: credentials.consumerKey,
       consumerSecret: credentials.consumerSecret,
@@ -47,6 +48,7 @@ class WooCommerceService {
   listStores() {
     return Array.from(this.stores.values()).map(s => ({
       storeId: s.storeId,
+      name: s.name || s.storeId,
       url: s.baseUrl,
       lastSyncAt: s.lastSyncAt,
       orderCount: s.orderCount,

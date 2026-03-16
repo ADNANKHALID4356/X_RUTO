@@ -9,7 +9,7 @@ const driverAPI = {
   getAllRoutes: async (date = new Date().toISOString().split('T')[0]) => {
     try {
       // First try to get generated routes
-      const routesResponse = await fetch(`${API_BASE_URL}/orders/get-routes?date=${date}`);
+      const routesResponse = await fetch(`${API_BASE_URL}/orders/routes?date=${date}`);
       if (routesResponse.ok) {
         const routesResult = await routesResponse.json();
         if (routesResult.success && routesResult.routes.length > 0) {

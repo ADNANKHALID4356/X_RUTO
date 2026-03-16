@@ -66,6 +66,10 @@ router.post('/auto-assign-drivers',
   ordersController.autoAssignDrivers
 );
 
+// ===== ANALYTICS ROUTE =====
+
+router.get('/analytics', ordersController.getAnalytics);
+
 // ===== TAB 3: ROUTE DISPATCH ROUTES =====
 
 router.post('/dispatch-routes',
@@ -112,11 +116,11 @@ try {
 // Register a WooCommerce store
 router.post('/woocommerce/register', async (req, res) => {
   try {
-    const { storeId, url, consumerKey, consumerSecret } = req.body;
+    const { storeId, name, url, consumerKey, consumerSecret } = req.body;
     if (!storeId || !url || !consumerKey || !consumerSecret) {
       return res.status(400).json({ success: false, message: 'Missing required fields: storeId, url, consumerKey, consumerSecret' });
     }
-    const result = wooCommerceService.registerStore(storeId, { url, consumerKey, consumerSecret });
+    const result = wooCommerceService.registerStore(storeId, { name, url, consumerKey, consumerSecret });
     res.json(result);
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });

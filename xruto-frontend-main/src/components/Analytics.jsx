@@ -29,9 +29,37 @@ const Analytics = () => {
   const loadAnalytics = async () => {
     setLoading(true);
     try {
-      // Fetch data from multiple endpoints
+      const date = new Date().toISOString().split('T')[0];
+
+      // Try the dedicated analytics endpoint first
+      const analyticsRes = await fetch(`${API_BASE_URL}/orders/analytics?date=${date}&range=${dateRange}`)
+        .then(r => r.ok ? r.json() : null)
+        .catch(() => null);
+
+      if (analyticsRes?.success && analyticsRes.analytics) {
+        const a = analyticsRes.analytics;
+        setStats({
+          totalOrders: a.orders.total,
+          completedOrders: a.orders.delivered,
+          pendingOrders: a.orders.pending,
+          failedOrders: a.orders.failed,
+          totalRoutes: a.routes.total,
+          activeRoutes: a.routes.in_progress,
+          totalDrivers: a.drivers.total,
+          activeDrivers: a.drivers.active,
+          totalDistance: a.performance.total_distance_km,
+          totalFuelCost: a.performance.total_fuel_cost,
+          avgDeliveryTime: a.performance.avg_delivery_time_minutes,
+          deliverySuccessRate: a.performance.success_rate,
+        });
+        setDriverPerformance(a.driver_performance || []);
+        setRouteMetrics([]);
+        return;
+      }
+
+      // Fallback: compose analytics from individual endpoints
       const [ordersRes, driversRes, routesRes] = await Promise.allSettled([
-        fetch(`${API_BASE_URL}/orders/eligible?date=${new Date().toISOString().split('T')[0]}`).then(r => r.json()),
+        fetch(`${API_BASE_URL}/orders/eligible?date=${date}`).then(r => r.json()),
         fetch(`${API_BASE_URL}/admin/drivers`).then(r => r.json()),
         fetch(`${API_BASE_URL}/orders/routes`).then(r => r.json()),
       ]);
@@ -64,17 +92,15 @@ const Analytics = () => {
         deliverySuccessRate: orders.length > 0 ? Math.round((completed / orders.length) * 100) : 0,
       });
 
-      // Driver performance metrics
       setDriverPerformance(drivers.map(d => ({
         name: d.name,
         vehicle: d.vehicle_type || 'Van',
         mpg: d.mpg || 35,
         isActive: d.is_active !== false,
         assignedRoutes: routes.filter(r => r.driver_id === d.id).length,
-        completedOrders: 0, // Would need per-driver order tracking
+        completedOrders: 0,
       })));
 
-      // Route performance
       setRouteMetrics(routes.map(r => ({
         name: r.route_name,
         orders: r.total_orders || 0,

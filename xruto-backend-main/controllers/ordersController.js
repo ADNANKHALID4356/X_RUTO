@@ -133,12 +133,30 @@ const ordersController = {
   // POST /api/orders/generate-routes
   async generateRoutes(req, res) {
     try {
-      const { zones } = req.body;
+      const { zones, fuel_price_per_litre, driver_mpg } = req.body;
       if (!zones || zones.length === 0) {
         return res.status(400).json({ success: false, message: 'No zones provided for route generation' });
       }
 
-      console.log('Generating optimized routes for', zones.length, 'zones');
+      // Use fuel price / MPG from request or fetch from settings
+      let fuelPrice = fuel_price_per_litre ? parseFloat(fuel_price_per_litre) : null;
+      let mpg = driver_mpg ? parseFloat(driver_mpg) : null;
+
+      if (!fuelPrice) {
+        const supabase = getSupabase();
+        if (supabase) {
+          try {
+            const { data: settings } = await supabase.from('settings').select('default_fuel_price').single();
+            if (settings?.default_fuel_price) fuelPrice = parseFloat(settings.default_fuel_price);
+          } catch (dbError) {
+            console.warn('Could not fetch fuel price from settings, using default £1.45/L:', dbError.message);
+          }
+        }
+        fuelPrice = fuelPrice || 1.45;
+      }
+      mpg = mpg || 30;
+
+      console.log('Generating optimized routes for', zones.length, 'zones (fuel £' + fuelPrice + '/L, ' + mpg + ' MPG)');
       const depot = { latitude: 53.3808256, longitude: -2.575416 };
 
       const routes = zones.map((zone, index) => {
@@ -157,7 +175,7 @@ const ordersController = {
         }));
 
         const navigationResult = generateNavigationURL(depot, waypoints, true);
-        const metrics = calculateRealisticMetrics(zone.total_orders);
+        const metrics = calculateRealisticMetrics(zone.total_orders, fuelPrice, mpg);
 
         return {
           route_id: routeId,
@@ -858,6 +876,121 @@ const ordersController = {
     } catch (error) {
       console.error('Reset orders error:', error);
       res.status(500).json({ success: false, message: 'Failed to reset orders', error: error.message });
+    }
+  },
+
+  // GET /api/orders/analytics
+  async getAnalytics(req, res) {
+    try {
+      const { date = new Date().toISOString().split('T')[0], range = 'today' } = req.query;
+      const supabase = getSupabase();
+
+      let analytics = {
+        date,
+        range,
+        orders: { total: 0, delivered: 0, pending: 0, failed: 0, in_route: 0 },
+        routes: { total: 0, completed: 0, in_progress: 0, assigned: 0 },
+        drivers: { total: 0, active: 0, available_today: 0 },
+        performance: { total_distance_km: 0, total_fuel_cost: 0, avg_delivery_time_minutes: 0, success_rate: 0 },
+        driver_performance: []
+      };
+
+      if (supabase) {
+        try {
+          // Fetch orders, routes, and drivers in parallel
+          const [ordersResult, driversResult, routesResult] = await Promise.all([
+            supabase.from('orders').select('id, status, driver_id').eq('delivery_date', date),
+            supabase.from('drivers').select('id, is_active, is_available_today'),
+            supabase.from('routes').select('id, status, total_distance_km, estimated_fuel_cost, estimated_duration_minutes, driver_id').eq('delivery_date', date)
+          ]);
+
+          const orders = ordersResult.data || [];
+          const drivers = driversResult.data || [];
+          const routes = routesResult.data || [];
+
+          analytics.orders.total = orders.length;
+          analytics.orders.delivered = orders.filter(o => o.status === 'delivered').length;
+          analytics.orders.pending = orders.filter(o => o.status === 'pending').length;
+          analytics.orders.failed = orders.filter(o => o.status === 'failed').length;
+          analytics.orders.in_route = orders.filter(o => o.status === 'in_route' || o.status === 'out_for_delivery').length;
+
+          analytics.routes.total = routes.length;
+          analytics.routes.completed = routes.filter(r => r.status === 'completed').length;
+          analytics.routes.in_progress = routes.filter(r => r.status === 'in_progress' || r.status === 'dispatched').length;
+          analytics.routes.assigned = routes.filter(r => r.status === 'assigned').length;
+
+          analytics.drivers.total = drivers.length;
+          analytics.drivers.active = drivers.filter(d => d.is_active).length;
+          analytics.drivers.available_today = drivers.filter(d => d.is_active && d.is_available_today).length;
+
+          analytics.performance.total_distance_km = Math.round(routes.reduce((s, r) => s + (r.total_distance_km || 0), 0) * 100) / 100;
+          analytics.performance.total_fuel_cost = Math.round(routes.reduce((s, r) => s + (r.estimated_fuel_cost || 0), 0) * 100) / 100;
+          analytics.performance.avg_delivery_time_minutes = routes.length > 0
+            ? Math.round(routes.reduce((s, r) => s + (r.estimated_duration_minutes || 0), 0) / routes.length)
+            : 0;
+          analytics.performance.success_rate = analytics.orders.total > 0
+            ? Math.round((analytics.orders.delivered / analytics.orders.total) * 100)
+            : 0;
+
+          // Per-driver performance
+          const driverMap = {};
+          routes.forEach(r => {
+            if (!r.driver_id) return;
+            if (!driverMap[r.driver_id]) {
+              driverMap[r.driver_id] = { driver_id: r.driver_id, routes: 0, distance_km: 0, fuel_cost: 0 };
+            }
+            driverMap[r.driver_id].routes += 1;
+            driverMap[r.driver_id].distance_km += r.total_distance_km || 0;
+            driverMap[r.driver_id].fuel_cost += r.estimated_fuel_cost || 0;
+          });
+          orders.forEach(o => {
+            if (!o.driver_id || !driverMap[o.driver_id]) return;
+            if (!driverMap[o.driver_id].delivered) driverMap[o.driver_id].delivered = 0;
+            if (!driverMap[o.driver_id].total_orders) driverMap[o.driver_id].total_orders = 0;
+            driverMap[o.driver_id].total_orders += 1;
+            if (o.status === 'delivered') driverMap[o.driver_id].delivered += 1;
+          });
+          analytics.driver_performance = Object.values(driverMap).map(d => ({
+            ...d,
+            distance_km: Math.round(d.distance_km * 100) / 100,
+            fuel_cost: Math.round(d.fuel_cost * 100) / 100,
+            success_rate: d.total_orders > 0 ? Math.round(((d.delivered || 0) / d.total_orders) * 100) : 0
+          }));
+
+          return res.json({ success: true, analytics });
+        } catch (dbError) {
+          console.error('Supabase analytics error, using in-memory fallback:', dbError.message);
+        }
+      }
+
+      // In-memory fallback using routeOrdersMap / orderStatusMap
+      let totalOrders = 0;
+      let deliveredOrders = 0;
+      let pendingOrders = 0;
+      let totalDistanceKm = 0;
+
+      for (const [, orders] of routeOrdersMap.entries()) {
+        totalOrders += orders.length;
+        orders.forEach(order => {
+          const status = orderStatusMap.get(order.id) || 'pending';
+          if (status === 'delivered') deliveredOrders += 1;
+          else pendingOrders += 1;
+        });
+        const metrics = calculateRealisticMetrics(orders.length);
+        totalDistanceKm += metrics.distance_km;
+      }
+
+      analytics.orders.total = totalOrders;
+      analytics.orders.delivered = deliveredOrders;
+      analytics.orders.pending = pendingOrders;
+      analytics.routes.total = routeOrdersMap.size;
+      analytics.performance.total_distance_km = Math.round(totalDistanceKm * 100) / 100;
+      analytics.performance.success_rate = totalOrders > 0 ? Math.round((deliveredOrders / totalOrders) * 100) : 0;
+
+      res.json({ success: true, analytics });
+    } catch (error) {
+      console.error('Analytics error:', error);
+      res.status(500).json({ success: false, message: 'Failed to fetch analytics', error: error.message });
     }
   },
 

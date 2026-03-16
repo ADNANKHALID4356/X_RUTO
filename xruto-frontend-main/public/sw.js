@@ -17,7 +17,7 @@ const STATIC_ASSETS = [
 // API endpoints to cache with network-first strategy
 const API_ENDPOINTS = [
   '/api/orders/eligible',
-  '/api/orders/get-routes',
+  '/api/orders/routes',
   '/api/admin/drivers',
   '/api/admin/depots',
   '/api/admin/settings'

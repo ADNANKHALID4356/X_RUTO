@@ -1,6 +1,7 @@
 
 import React, { useState, useEffect } from 'react';
 import { adminAPI } from '../services/api';
+import WooCommerceStores from './WooCommerceStores';
 
 // Enhanced SVG Icons
 const InfoIcon = ({ className, onClick }) => (
@@ -813,6 +814,11 @@ const MyAdmin = ({ onNavigateToDashboard }) => {
                 max={120}
                 showHelp={showHelp}
               />
+
+              {/* WooCommerce store management */}
+              <div className="mt-4">
+                <WooCommerceStores />
+              </div>
             </div>
           )}
 
