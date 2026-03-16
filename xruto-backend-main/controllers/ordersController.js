@@ -852,8 +852,8 @@ const ordersController = {
       }
 
       // No Supabase — save to in-memory store so getEligibleOrders can serve them
-      validOrders.forEach((order, idx) => {
-        const id = 'mem_' + Date.now() + '_' + idx;
+      validOrders.forEach((order) => {
+        const id = 'mem_' + require('crypto').randomUUID();
         inMemoryOrders.set(id, { ...order, id });
         orderStatusMap.set(id, 'pending');
       });
