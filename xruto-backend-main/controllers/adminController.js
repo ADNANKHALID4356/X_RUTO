@@ -1,4 +1,5 @@
-﻿const { getSupabase } = require('../config/supabase');
+const { getSupabase } = require('../config/supabase');
+const { inMemorySettings } = require('../state/routeState');
 
 const adminController = {
   // GET /api/admin/settings
@@ -20,11 +21,12 @@ const adminController = {
             settings: settings || adminController._defaultSettings()
           });
         } catch (dbError) {
-          console.error('Supabase settings error, using defaults:', dbError.message);
+          console.error('Supabase settings error, using in-memory settings:', dbError.message);
         }
       }
 
-      res.json({ success: true, settings: adminController._defaultSettings() });
+      // Return persisted in-memory settings (not just hard-coded defaults)
+      res.json({ success: true, settings: { ...inMemorySettings } });
     } catch (error) {
       console.error('Get settings error:', error);
       res.status(500).json({ success: false, message: 'Failed to fetch settings', error: error.message });
@@ -61,7 +63,9 @@ const adminController = {
         }
       }
 
-      res.json({ success: true, message: 'Settings updated (no database configured)', settings: req.body });
+      // Persist in-memory so changes survive without a database
+      Object.assign(inMemorySettings, req.body);
+      res.json({ success: true, message: 'Settings updated (stored in-memory)', settings: { ...inMemorySettings } });
     } catch (error) {
       console.error('Update settings error:', error);
       res.status(500).json({ success: false, message: 'Failed to update settings', error: error.message });

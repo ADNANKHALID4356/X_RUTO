@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import ClusterMap from './ClusterMap';
 
 // Get API URL from environment variables
 const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:5000/api';
@@ -33,15 +34,15 @@ const driverAPI = {
   },
 
   // Update delivery status from driver app
-  updateDeliveryStatus: async (orderId, status, location = null) => {
+  updateDeliveryStatus: async (orderId, status, metadata = {}) => {
     try {
       const response = await fetch(`${API_BASE_URL}/orders/delivery-status/${orderId}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           status: status,
-          location: location,
-          timestamp: new Date().toISOString()
+          timestamp: new Date().toISOString(),
+          ...metadata
         })
       });
       
@@ -132,6 +133,108 @@ const DepotReturnSegments = ({ route, onNavigateSegment }) => {
   );
 };
 
+// ── Failure Reason Dialog ─────────────────────────────────────────────────────
+const FAILURE_REASONS = [
+  'No answer / not home',
+  'Wrong address',
+  'Access issue (gate/intercom)',
+  'Customer refused delivery',
+  'Damaged item',
+  'Incorrect order',
+  'Other',
+];
+
+const FailureReasonDialog = ({ orderId, customerName, onConfirm, onCancel }) => {
+  const [reason, setReason] = useState(FAILURE_REASONS[0]);
+  const [notes, setNotes] = useState('');
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 px-4">
+      <div className="bg-white rounded-xl shadow-2xl w-full max-w-sm p-5">
+        <h3 className="text-lg font-bold text-gray-800 mb-1">Mark as Failed</h3>
+        <p className="text-sm text-gray-500 mb-4">
+          Delivery for <strong>{customerName}</strong>
+        </p>
+
+        <label className="block text-sm font-medium text-gray-700 mb-1">Reason</label>
+        <select
+          value={reason}
+          onChange={(e) => setReason(e.target.value)}
+          className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm mb-3 focus:ring-2 focus:ring-red-400 focus:outline-none"
+        >
+          {FAILURE_REASONS.map((r) => (
+            <option key={r} value={r}>{r}</option>
+          ))}
+        </select>
+
+        <label className="block text-sm font-medium text-gray-700 mb-1">Additional Notes <span className="text-gray-400">(optional)</span></label>
+        <textarea
+          value={notes}
+          onChange={(e) => setNotes(e.target.value)}
+          rows={2}
+          placeholder="e.g. left card through door"
+          className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm mb-4 focus:ring-2 focus:ring-red-400 focus:outline-none"
+        />
+
+        <div className="flex gap-2">
+          <button
+            onClick={() => onConfirm(orderId, 'failed', { reason, notes })}
+            className="flex-1 bg-red-500 text-white py-2 rounded-lg font-medium hover:bg-red-600 transition-colors text-sm"
+          >
+            Confirm Failed
+          </button>
+          <button
+            onClick={onCancel}
+            className="flex-1 border border-gray-300 text-gray-700 py-2 rounded-lg font-medium hover:bg-gray-50 transition-colors text-sm"
+          >
+            Cancel
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+// ── Delivery Notes Dialog ─────────────────────────────────────────────────────
+const DeliveryNotesDialog = ({ orderId, customerName, onConfirm, onCancel }) => {
+  const [notes, setNotes] = useState('');
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 px-4">
+      <div className="bg-white rounded-xl shadow-2xl w-full max-w-sm p-5">
+        <h3 className="text-lg font-bold text-gray-800 mb-1">Confirm Delivery</h3>
+        <p className="text-sm text-gray-500 mb-4">
+          <strong>{customerName}</strong>
+        </p>
+
+        <label className="block text-sm font-medium text-gray-700 mb-1">Delivery Notes <span className="text-gray-400">(optional)</span></label>
+        <textarea
+          value={notes}
+          onChange={(e) => setNotes(e.target.value)}
+          rows={2}
+          placeholder="e.g. left with neighbour, signed by J. Smith"
+          className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm mb-4 focus:ring-2 focus:ring-green-400 focus:outline-none"
+        />
+
+        <div className="flex gap-2">
+          <button
+            onClick={() => onConfirm(orderId, 'delivered', { notes })}
+            className="flex-1 bg-green-500 text-white py-2 rounded-lg font-medium hover:bg-green-600 transition-colors text-sm"
+          >
+            ✓ Delivered
+          </button>
+          <button
+            onClick={onCancel}
+            className="flex-1 border border-gray-300 text-gray-700 py-2 rounded-lg font-medium hover:bg-gray-50 transition-colors text-sm"
+          >
+            Cancel
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+};
+
 // Status color mapping
 const getStatusColor = (status) => {
   switch (status) {
@@ -179,6 +282,9 @@ const DriverRoutes = () => {
   const [selectedRoute, setSelectedRoute] = useState(null);
   const [liveUpdateEnabled, setLiveUpdateEnabled] = useState(false);
   const [lastUpdate, setLastUpdate] = useState(new Date());
+  // Dialog state
+  const [failureDialog, setFailureDialog] = useState(null); // { orderId, customerName }
+  const [deliveryDialog, setDeliveryDialog] = useState(null); // { orderId, customerName }
 
   // Load driver routes
   const loadDriverRoutes = async () => {
@@ -348,17 +454,16 @@ const DriverRoutes = () => {
     window.open(navigationUrl, '_blank');
   };
 
-  // Update delivery status
-  const updateOrderStatus = async (orderId, newStatus) => {
+  // Update delivery status – accepts optional metadata (notes, failure reason)
+  const updateOrderStatus = async (orderId, newStatus, metadata = {}) => {
+    // Close any open dialogs
+    setFailureDialog(null);
+    setDeliveryDialog(null);
     try {
-      console.log(`Updating order ${orderId} to status: ${newStatus}`);
-      await driverAPI.updateDeliveryStatus(orderId, newStatus);
-      
+      console.log(`Updating order ${orderId} to status: ${newStatus}`, metadata);
+      await driverAPI.updateDeliveryStatus(orderId, newStatus, metadata);
       // Refresh routes after status update to show progress
       await loadDriverRoutes();
-      
-      // Show success message
-      alert(`Order marked as ${newStatus}`);
     } catch (error) {
       console.error('Failed to update order status:', error);
       alert(`Failed to update order status: ${error.message}`);
@@ -580,6 +685,16 @@ const DriverRoutes = () => {
                     onNavigateSegment={navigateToSegment}
                   />
 
+                  {/* Route Map */}
+                  <div className="mt-4">
+                    <h3 className="text-base font-semibold text-gray-800 mb-2">Route Map</h3>
+                    <ClusterMap
+                      routes={[{ ...route, orders: route.route_segments?.flatMap(s => s.orders || []) }]}
+                      height="260px"
+                      showLegend={false}
+                    />
+                  </div>
+
                   {/* Orders List */}
                   <div className="mt-6">
                     <h3 className="text-lg font-semibold text-gray-800 mb-4">Order Details</h3>
@@ -591,6 +706,12 @@ const DriverRoutes = () => {
                             <div>
                               <div className="font-medium text-gray-800">{order.customer_name}</div>
                               <div className="text-sm text-gray-600">{order.delivery_address}</div>
+                              {order.customer_phone && (
+                                <div className="text-xs text-gray-500">📞 {order.customer_phone}</div>
+                              )}
+                              {order.special_instructions && (
+                                <div className="text-xs text-orange-600 mt-0.5">⚠ {order.special_instructions}</div>
+                              )}
                             </div>
                           </div>
                           <div className="flex items-center space-x-2">
@@ -598,12 +719,20 @@ const DriverRoutes = () => {
                               {getStatusText(order.status)}
                             </span>
                             {order.status === 'pending' && (
-                              <button
-                                onClick={() => updateOrderStatus(order.id, 'delivered')}
-                                className="px-3 py-1 bg-green-500 text-white text-sm rounded hover:bg-green-600 transition-colors"
-                              >
-                                Mark Delivered
-                              </button>
+                              <>
+                                <button
+                                  onClick={() => setDeliveryDialog({ orderId: order.id, customerName: order.customer_name })}
+                                  className="px-3 py-1 bg-green-500 text-white text-sm rounded hover:bg-green-600 transition-colors"
+                                >
+                                  ✓ Delivered
+                                </button>
+                                <button
+                                  onClick={() => setFailureDialog({ orderId: order.id, customerName: order.customer_name })}
+                                  className="px-3 py-1 bg-red-500 text-white text-sm rounded hover:bg-red-600 transition-colors"
+                                >
+                                  ✗ Failed
+                                </button>
+                              </>
                             )}
                           </div>
                         </div>
@@ -616,6 +745,24 @@ const DriverRoutes = () => {
           ))}
         </div>
       </div>
+
+      {/* Dialogs */}
+      {deliveryDialog && (
+        <DeliveryNotesDialog
+          orderId={deliveryDialog.orderId}
+          customerName={deliveryDialog.customerName}
+          onConfirm={updateOrderStatus}
+          onCancel={() => setDeliveryDialog(null)}
+        />
+      )}
+      {failureDialog && (
+        <FailureReasonDialog
+          orderId={failureDialog.orderId}
+          customerName={failureDialog.customerName}
+          onConfirm={updateOrderStatus}
+          onCancel={() => setFailureDialog(null)}
+        />
+      )}
     </div>
   );
 };

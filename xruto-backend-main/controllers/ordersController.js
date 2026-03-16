@@ -1,5 +1,5 @@
 const { getSupabase } = require('../config/supabase');
-const { routeOrdersMap, orderStatusMap, inMemoryOrders } = require('../state/routeState');
+const { routeOrdersMap, orderStatusMap, inMemoryOrders, inMemorySettings } = require('../state/routeState');
 const {
   performKMeansClustering,
   generateNavigationURL,
@@ -76,7 +76,27 @@ const ordersController = {
         return res.status(400).json({ success: false, message: 'Please select at least one postcode area' });
       }
 
+      // Fetch admin settings (max_deliveries_per_route, etc.)
+      let maxDeliveriesPerRoute = inMemorySettings.max_deliveries_per_route || 25;
+      let effectiveMaxZones = parseInt(max_zones) || 5;
       const supabase = getSupabase();
+
+      if (supabase) {
+        try {
+          const { data: settings } = await supabase.from('settings').select('max_deliveries_per_route, max_routes_per_day').single();
+          if (settings) {
+            if (settings.max_deliveries_per_route) maxDeliveriesPerRoute = parseInt(settings.max_deliveries_per_route);
+            if (settings.max_routes_per_day) effectiveMaxZones = Math.min(effectiveMaxZones, parseInt(settings.max_routes_per_day));
+          }
+        } catch (settingsErr) {
+          console.warn('Could not read settings for clustering, using in-memory settings:', settingsErr.message);
+        }
+      } else {
+        // Use persisted in-memory settings when no database
+        if (inMemorySettings.max_routes_per_day) {
+          effectiveMaxZones = Math.min(effectiveMaxZones, inMemorySettings.max_routes_per_day);
+        }
+      }
 
       if (supabase) {
         try {
@@ -100,8 +120,12 @@ const ordersController = {
             return res.json({ success: true, zones: [], total_orders: 0, message: 'No orders found for selected postcodes' });
           }
 
+          // Determine number of zones needed to respect max_deliveries_per_route
+          const zonesNeeded = Math.ceil(filteredOrders.length / maxDeliveriesPerRoute);
+          const finalMaxZones = Math.max(effectiveMaxZones, zonesNeeded);
+
           const hereService = require('../services/hereAPI');
-          const zones = await hereService.generateOptimizedClustersForArea(filteredOrders, max_zones);
+          const zones = await hereService.generateOptimizedClustersForArea(filteredOrders, finalMaxZones);
 
           return res.json({
             success: true,
@@ -109,6 +133,7 @@ const ordersController = {
             total_orders: filteredOrders.length,
             clustering_method: 'kmeans',
             optimization_score: 85 + Math.random() * 10,
+            max_deliveries_per_route: maxDeliveriesPerRoute,
             message: 'Successfully clustered ' + filteredOrders.length + ' orders into ' + zones.length + ' zones'
           });
         } catch (dbError) {
@@ -127,13 +152,16 @@ const ordersController = {
       }));
 
       const ordersToCluster = allOrders.length > 0 ? allOrders : [
-        { id: '1', customer_name: 'John Smith', delivery_address: '123 Queens Road, Brighton', postcode: 'BN1 1AA', postcode_area: 'BN1', order_value: 45.99, weight: 2.5, special_instructions: 'Ring doorbell twice' },
-        { id: '2', customer_name: 'Sarah Wilson', delivery_address: '456 Western Road, Brighton', postcode: 'BN1 2BB', postcode_area: 'BN1', order_value: 78.50, weight: 3.2, special_instructions: null },
-        { id: '3', customer_name: 'Mike Johnson', delivery_address: '789 North Street, Brighton', postcode: 'BN1 1YZ', postcode_area: 'BN1', order_value: 67.80, weight: 3.5, special_instructions: 'Leave with neighbor if out' },
-        { id: '4', customer_name: 'Emma Brown', delivery_address: '12 Elm Grove, Brighton', postcode: 'BN2 3DE', postcode_area: 'BN2', order_value: 28.75, weight: 1.5, special_instructions: 'Fragile items' }
+        { id: '1', customer_name: 'John Smith', delivery_address: '123 Queens Road, Brighton', postcode: 'BN1 1AA', postcode_area: 'BN1', order_value: 45.99, weight: 2.5, latitude: 53.3810, longitude: -2.5730, special_instructions: 'Ring doorbell twice' },
+        { id: '2', customer_name: 'Sarah Wilson', delivery_address: '456 Western Road, Brighton', postcode: 'BN1 2BB', postcode_area: 'BN1', order_value: 78.50, weight: 3.2, latitude: 53.3815, longitude: -2.5748, special_instructions: null },
+        { id: '3', customer_name: 'Mike Johnson', delivery_address: '789 North Street, Brighton', postcode: 'BN1 1YZ', postcode_area: 'BN1', order_value: 67.80, weight: 3.5, latitude: 53.3806, longitude: -2.5763, special_instructions: 'Leave with neighbor if out' },
+        { id: '4', customer_name: 'Emma Brown', delivery_address: '12 Elm Grove, Brighton', postcode: 'BN2 3DE', postcode_area: 'BN2', order_value: 28.75, weight: 1.5, latitude: 53.3804, longitude: -2.5745, special_instructions: 'Fragile items' }
       ].filter(order => selected_postcodes.includes(order.postcode_area));
 
-      const zones = performKMeansClustering(ordersToCluster, max_zones);
+      // Determine zones respecting max_deliveries_per_route
+      const zonesNeeded = ordersToCluster.length > 0 ? Math.ceil(ordersToCluster.length / maxDeliveriesPerRoute) : 1;
+      const finalZones = Math.max(effectiveMaxZones, zonesNeeded);
+      const zones = performKMeansClustering(ordersToCluster, finalZones);
 
       res.json({
         success: true,
@@ -141,6 +169,7 @@ const ordersController = {
         total_orders: ordersToCluster.length,
         clustering_method: 'kmeans',
         optimization_score: 88,
+        max_deliveries_per_route: maxDeliveriesPerRoute,
         message: 'Successfully clustered ' + ordersToCluster.length + ' orders into ' + zones.length + ' zones (demo mode)'
       });
     } catch (error) {
@@ -160,22 +189,32 @@ const ordersController = {
       // Use fuel price / MPG from request or fetch from settings
       let fuelPrice = fuel_price_per_litre ? parseFloat(fuel_price_per_litre) : null;
       let mpg = driver_mpg ? parseFloat(driver_mpg) : null;
+      let stockRefillEnabled = !!inMemorySettings.enable_stock_refill;
+      let maxDeliveriesPerRoute = inMemorySettings.max_deliveries_per_route || 25;
+      let navPreference = inMemorySettings.navigation_app_preference || 'here'; // 'here' | 'google'
 
-      if (!fuelPrice) {
-        const supabase = getSupabase();
-        if (supabase) {
-          try {
-            const { data: settings } = await supabase.from('settings').select('default_fuel_price').single();
-            if (settings?.default_fuel_price) fuelPrice = parseFloat(settings.default_fuel_price);
-          } catch (dbError) {
-            console.warn('Could not fetch fuel price from settings, using default £1.45/L:', dbError.message);
+      const supabase = getSupabase();
+      if (supabase) {
+        try {
+          const { data: settings } = await supabase
+            .from('settings')
+            .select('default_fuel_price, enable_stock_refill, max_deliveries_per_route, navigation_app_preference')
+            .single();
+          if (settings) {
+            if (!fuelPrice && settings.default_fuel_price) fuelPrice = parseFloat(settings.default_fuel_price);
+            if (settings.enable_stock_refill !== undefined) stockRefillEnabled = !!settings.enable_stock_refill;
+            if (settings.max_deliveries_per_route) maxDeliveriesPerRoute = parseInt(settings.max_deliveries_per_route);
+            if (settings.navigation_app_preference) navPreference = settings.navigation_app_preference;
           }
+        } catch (dbError) {
+          console.warn('Could not fetch settings for route generation, using in-memory settings:', dbError.message);
         }
-        fuelPrice = fuelPrice || 1.45;
       }
+
+      fuelPrice = fuelPrice || 1.45;
       mpg = mpg || 30;
 
-      console.log('Generating optimized routes for', zones.length, 'zones (fuel £' + fuelPrice + '/L, ' + mpg + ' MPG)');
+      console.log('Generating optimized routes for', zones.length, 'zones (fuel £' + fuelPrice + '/L, ' + mpg + ' MPG, stockRefill=' + stockRefillEnabled + ', nav=' + navPreference + ')');
       const depot = { latitude: 53.3808256, longitude: -2.575416 };
 
       const routes = zones.map((zone, index) => {
@@ -193,8 +232,71 @@ const ordersController = {
           postcode: order.postcode
         }));
 
-        const navigationResult = generateNavigationURL(depot, waypoints, true);
+        // Generate navigation URL according to admin's preferred map app
+        let navigationUrl;
+        if (navPreference === 'google') {
+          const depotCoord = `${depot.latitude},${depot.longitude}`;
+          const seen = new Set();
+          const uniqueWps = waypoints.filter(wp => {
+            const key = `${wp.lat},${wp.lng}`;
+            if (seen.has(key)) return false;
+            seen.add(key);
+            return true;
+          });
+          const waypointsParam = uniqueWps.map(wp => `${wp.lat},${wp.lng}`).join('/');
+          navigationUrl = `https://www.google.com/maps/dir/${depotCoord}/${waypointsParam}/${depotCoord}`;
+        } else {
+          const navigationResult = generateNavigationURL(depot, waypoints, true);
+          navigationUrl = navigationResult.url;
+        }
+
+        const navigationStats = (() => {
+          const seen = new Set();
+          let dups = 0;
+          waypoints.forEach(wp => {
+            const key = `${wp.lat},${wp.lng}`;
+            if (seen.has(key)) dups++; else seen.add(key);
+          });
+          return { unique: seen.size, duplicates: dups, expected_points: seen.size + 2 };
+        })();
+
         const metrics = calculateRealisticMetrics(zone.total_orders, fuelPrice, mpg);
+
+        // Calculate depot return segments if stock refill is enabled
+        const depotReturnsNeeded = stockRefillEnabled
+          ? Math.max(0, Math.ceil(zone.total_orders / maxDeliveriesPerRoute) - 1)
+          : 0;
+
+        const routeSegments = [];
+        if (stockRefillEnabled && zone.orders && zone.orders.length > maxDeliveriesPerRoute) {
+          let segStart = 0;
+          while (segStart < zone.orders.length) {
+            const segOrders = zone.orders.slice(segStart, segStart + maxDeliveriesPerRoute);
+            const segWaypoints = segOrders.map(o => ({
+              lat: parseFloat(o.latitude) || depot.latitude,
+              lng: parseFloat(o.longitude) || depot.longitude
+            }));
+            const segNavResult = generateNavigationURL(depot, segWaypoints, true);
+            routeSegments.push({
+              segment_number: routeSegments.length + 1,
+              orders: segOrders,
+              estimated_duration_minutes: Math.round(10 + segOrders.length * 7),
+              total_distance_km: Math.round((3 + segOrders.length * 2) * 100) / 100,
+              return_to_depot: segStart + maxDeliveriesPerRoute < zone.orders.length,
+              navigation_url: segNavResult.url
+            });
+            segStart += maxDeliveriesPerRoute;
+          }
+        } else {
+          routeSegments.push({
+            segment_number: 1,
+            orders: zone.orders || [],
+            estimated_duration_minutes: metrics.time_minutes,
+            total_distance_km: metrics.distance_km,
+            return_to_depot: false,
+            navigation_url: navigationUrl
+          });
+        }
 
         return {
           route_id: routeId,
@@ -207,13 +309,16 @@ const ordersController = {
           estimated_duration_minutes: metrics.time_minutes,
           estimated_fuel_cost: metrics.fuel_cost,
           route_efficiency_score: Math.min(95, 85 + Math.random() * 10),
-          navigation_url: navigationResult.url,
+          navigation_url: navigationUrl,
+          navigation_app: navPreference,
+          depot_returns_needed: depotReturnsNeeded,
+          route_segments: routeSegments,
           order_summary: {
             total_orders: zone.total_orders,
             actual_orders_count: zone.orders?.length || 0,
-            unique_coordinates: navigationResult.stats.unique,
-            duplicate_coordinates: navigationResult.stats.duplicates,
-            expected_google_maps_points: navigationResult.stats.expected_points
+            unique_coordinates: navigationStats.unique,
+            duplicate_coordinates: navigationStats.duplicates,
+            expected_map_points: navigationStats.expected_points
           },
           driver_id: null,
           driver_name: null,
