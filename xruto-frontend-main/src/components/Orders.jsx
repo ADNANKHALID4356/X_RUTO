@@ -358,16 +358,25 @@ const FilterOrdersTab = ({ orders, setOrders, postcodeOptions, setPostcodeOption
 // ============================================================
 //  Route print helper (opens a new window with printable sheet)
 // ============================================================
+
+// Escape user-supplied text before inserting into an HTML string
+const escapeHtml = (str) => String(str || '')
+  .replace(/&/g, '&amp;')
+  .replace(/</g, '&lt;')
+  .replace(/>/g, '&gt;')
+  .replace(/"/g, '&quot;')
+  .replace(/'/g, '&#39;');
+
 const printRouteSheet = (route) => {
   const stops = (route.orders || []).map((o, idx) => `
     <tr style="border-bottom:1px solid #eee">
       <td style="padding:8px 12px;font-weight:bold;width:40px">${idx + 1}</td>
       <td style="padding:8px 12px">
-        <strong>${o.customer_name || 'Unknown'}</strong><br/>
-        <span style="color:#555;font-size:13px">${o.delivery_address || ''}</span><br/>
-        <span style="background:#f0f0f0;padding:2px 6px;border-radius:10px;font-size:12px">${o.postcode || ''}</span>
-        ${o.customer_phone ? `<br/><span style="color:#777;font-size:12px">📞 ${o.customer_phone}</span>` : ''}
-        ${o.special_instructions ? `<br/><em style="color:#e07800;font-size:12px">⚠ ${o.special_instructions}</em>` : ''}
+        <strong>${escapeHtml(o.customer_name) || 'Unknown'}</strong><br/>
+        <span style="color:#555;font-size:13px">${escapeHtml(o.delivery_address)}</span><br/>
+        <span style="background:#f0f0f0;padding:2px 6px;border-radius:10px;font-size:12px">${escapeHtml(o.postcode)}</span>
+        ${o.customer_phone ? `<br/><span style="color:#777;font-size:12px">📞 ${escapeHtml(o.customer_phone)}</span>` : ''}
+        ${o.special_instructions ? `<br/><em style="color:#e07800;font-size:12px">⚠ ${escapeHtml(o.special_instructions)}</em>` : ''}
       </td>
       <td style="padding:8px 12px;color:#555;font-size:13px">${o.order_value ? `£${Number(o.order_value).toFixed(2)}` : '-'}</td>
       <td style="padding:8px 12px;width:80px">
@@ -376,15 +385,15 @@ const printRouteSheet = (route) => {
     </tr>`).join('');
 
   const html = `<!DOCTYPE html><html><head><meta charset="utf-8"/>
-    <title>Route Sheet – ${route.route_name}</title>
+    <title>Route Sheet – ${escapeHtml(route.route_name)}</title>
     <style>body{font-family:Arial,sans-serif;margin:20px;color:#222}h1{font-size:20px;margin-bottom:4px}
     table{width:100%;border-collapse:collapse;margin-top:16px}th{background:#f4f4f4;padding:8px 12px;text-align:left;font-size:13px}
     @media print{button{display:none}}</style></head>
     <body>
     <button onclick="window.print()" style="float:right;padding:6px 14px;background:#4caf50;color:#fff;border:none;border-radius:4px;cursor:pointer;font-size:13px">🖨 Print</button>
-    <h1>Route Sheet: ${route.route_name}</h1>
+    <h1>Route Sheet: ${escapeHtml(route.route_name)}</h1>
     <div style="display:flex;gap:24px;margin-bottom:12px;font-size:13px;color:#555">
-      <span>Driver: <strong>${route.driver_name || 'Unassigned'}</strong></span>
+      <span>Driver: <strong>${escapeHtml(route.driver_name) || 'Unassigned'}</strong></span>
       <span>Stops: <strong>${route.total_orders}</strong></span>
       <span>Distance: <strong>${route.total_distance_km ? route.total_distance_km.toFixed(1) + ' km' : '-'}</strong></span>
       <span>ETA: <strong>${route.estimated_duration_minutes ? Math.round(route.estimated_duration_minutes) + ' min' : '-'}</strong></span>
@@ -404,12 +413,23 @@ const printRouteSheet = (route) => {
 // ============================================================
 //  TAB 2 - Route Review & Driver Assignment
 // ============================================================
-const RouteReviewTab = ({ zones, routes, setRoutes, onProceedToDispatch }) => {
+const RouteReviewTab = ({ zones, routes, setRoutes, onProceedToDispatch, onRegenerateRoutes }) => {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [drivers, setDrivers] = useState([]);
   const [driversLoading, setDriversLoading] = useState(false);
   const [autoAssigning, setAutoAssigning] = useState(false);
+  const [maxRoutesPerDay, setMaxRoutesPerDay] = useState(null);
+
+  // Fetch admin settings to get max_routes_per_day limit
+  useEffect(() => {
+    fetch(`${API_BASE_URL}/admin/settings`)
+      .then(r => r.ok ? r.json() : null)
+      .then(data => {
+        if (data?.settings?.max_routes_per_day) setMaxRoutesPerDay(data.settings.max_routes_per_day);
+      })
+      .catch(() => {});
+  }, []);
 
   const handleGenerateRoutes = useCallback(async () => {
     if (zones.length === 0) return;
@@ -503,6 +523,13 @@ const RouteReviewTab = ({ zones, routes, setRoutes, onProceedToDispatch }) => {
         ))}
       </div>
 
+      {/* Daily route limit warning */}
+      {maxRoutesPerDay !== null && routes.length >= maxRoutesPerDay && (
+        <div className="bg-yellow-500/20 border border-yellow-500/40 text-yellow-300 px-4 py-3 rounded-lg text-sm flex items-center gap-2">
+          ⚠ Daily route limit reached ({routes.length}/{maxRoutesPerDay}). Increase the limit in Admin Settings before adding more routes.
+        </div>
+      )}
+
       {error && (
         <div className="bg-red-500/20 border border-red-500/40 text-red-300 px-4 py-3 rounded-lg text-sm">
           {error}
@@ -512,8 +539,13 @@ const RouteReviewTab = ({ zones, routes, setRoutes, onProceedToDispatch }) => {
 
       {/* Actions */}
       <div className="flex flex-wrap gap-2">
+        {onRegenerateRoutes && (
+          <button onClick={onRegenerateRoutes} className="px-4 py-2 bg-gray-700 text-gray-300 rounded-lg text-sm font-medium hover:bg-gray-600 transition-colors flex items-center gap-1">
+            ← Back to Filter
+          </button>
+        )}
         <button onClick={handleGenerateRoutes} disabled={loading || zones.length === 0} className="px-4 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 disabled:opacity-50 transition-colors">
-          {loading ? 'Generating...' : 'Regenerate Routes'}
+          {loading ? 'Generating...' : '↻ Regenerate Routes'}
         </button>
         <button onClick={handleAutoAssign} disabled={autoAssigning || routes.length === 0 || drivers.length === 0} className="px-4 py-2 bg-purple-600 text-white rounded-lg text-sm font-medium hover:bg-purple-700 disabled:opacity-50 transition-colors">
           {autoAssigning ? 'Assigning...' : 'Auto-Assign Drivers'}
@@ -853,6 +885,7 @@ const Orders = ({ onNavigateBack, onNavigateToRouteDetail }) => {
             routes={routes}
             setRoutes={setRoutes}
             onProceedToDispatch={() => setActiveTab(2)}
+            onRegenerateRoutes={() => { setZones([]); setRoutes([]); setActiveTab(0); }}
           />
         )}
         {activeTab === 2 && (

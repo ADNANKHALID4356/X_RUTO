@@ -7,6 +7,7 @@ const {
   calculateRealisticMetrics
 } = require('../utils/routeHelpers');
 const PDFParserService = require('../services/pdfParser');
+const crypto = require('crypto');
 
 const pdfParserService = new PDFParserService();
 
@@ -576,26 +577,62 @@ const ordersController = {
   async updateDeliveryStatus(req, res) {
     try {
       const { orderId } = req.params;
-      const { status, notes } = req.body;
+      // Accept reason (failure reason) and notes in addition to status
+      const { status, notes, reason } = req.body;
 
       const validStatuses = ['pending', 'assigned', 'in_route', 'delivered', 'failed', 'returned'];
       if (!validStatuses.includes(status)) {
         return res.status(400).json({ success: false, message: 'Status must be one of: ' + validStatuses.join(', ') });
       }
 
-      console.log('Updating order ' + orderId + ' status to: ' + status);
+      console.log('Updating order ' + orderId + ' status to: ' + status + (reason ? ' (reason: ' + reason + ')' : ''));
       const supabase = getSupabase();
+
+      // Track order details for possible WooCommerce sync-back
+      let orderRecord = inMemoryOrders.get(orderId);
 
       if (supabase) {
         const updateData = { status, updated_at: new Date().toISOString() };
         if (status === 'delivered') updateData.delivered_at = new Date().toISOString();
         if (notes) updateData.delivery_notes = notes;
+        if (reason) updateData.failure_reason = reason;
 
-        const { error } = await supabase.from('orders').update(updateData).eq('id', orderId).select();
-        if (error) console.error('Error updating order in database:', error);
+        const { data, error } = await supabase.from('orders').update(updateData).eq('id', orderId).select().single();
+        if (error) {
+          console.error('Error updating order in database:', error);
+        } else {
+          orderRecord = data;
+        }
       }
 
+      // Update in-memory store
       orderStatusMap.set(orderId, status);
+      if (orderRecord) {
+        inMemoryOrders.set(orderId, {
+          ...orderRecord,
+          status,
+          delivery_notes: notes || orderRecord.delivery_notes,
+          failure_reason: reason || orderRecord.failure_reason,
+        });
+      }
+
+      // ── WooCommerce sync-back ────────────────────────────────────────────────
+      // When a delivery is confirmed or failed, push the status update back to
+      // the originating WooCommerce store so the store owner is kept in sync.
+      if (['delivered', 'failed'].includes(status)) {
+        try {
+          const wooService = require('../services/woocommerce');
+          const record = orderRecord || (inMemoryOrders ? inMemoryOrders.get(orderId) : null);
+          if (record && record.wc_order_id && record.store_id) {
+            const wcStatus = status === 'delivered' ? 'completed' : 'failed';
+            await wooService.updateOrderStatus(record.store_id, record.wc_order_id, wcStatus, { notes, reason });
+            console.log(`WooCommerce sync-back: order ${record.wc_order_id} -> ${wcStatus}`);
+          }
+        } catch (wcErr) {
+          // Non-fatal: log but don't fail the request
+          console.warn('WooCommerce sync-back failed (non-fatal):', wcErr.message);
+        }
+      }
 
       // Calculate route progress
       let routeProgress = null;
@@ -620,6 +657,7 @@ const ordersController = {
         order_id: orderId,
         status,
         notes: notes || null,
+        failure_reason: reason || null,
         timestamp: new Date().toISOString(),
         route_progress: routeProgress
       });
@@ -958,7 +996,7 @@ const ordersController = {
 
       // No Supabase — save to in-memory store so getEligibleOrders can serve them
       validOrders.forEach((order) => {
-        const id = 'mem_' + require('crypto').randomUUID();
+        const id = 'mem_' + crypto.randomUUID();
         inMemoryOrders.set(id, { ...order, id });
         orderStatusMap.set(id, 'pending');
       });
@@ -1017,9 +1055,24 @@ const ordersController = {
       const { date = new Date().toISOString().split('T')[0], range = 'today' } = req.query;
       const supabase = getSupabase();
 
+      // Compute date range boundaries
+      const endDate = date;
+      let startDate = date;
+      if (range === 'week') {
+        const d = new Date(date);
+        d.setDate(d.getDate() - 6);
+        startDate = d.toISOString().split('T')[0];
+      } else if (range === 'month') {
+        const d = new Date(date);
+        d.setDate(d.getDate() - 29);
+        startDate = d.toISOString().split('T')[0];
+      }
+
       let analytics = {
         date,
         range,
+        start_date: startDate,
+        end_date: endDate,
         orders: { total: 0, delivered: 0, pending: 0, failed: 0, in_route: 0 },
         routes: { total: 0, completed: 0, in_progress: 0, assigned: 0 },
         drivers: { total: 0, active: 0, available_today: 0 },
@@ -1029,11 +1082,13 @@ const ordersController = {
 
       if (supabase) {
         try {
-          // Fetch orders, routes, and drivers in parallel
+          // Fetch orders and routes over the date range (drivers are always all-time)
           const [ordersResult, driversResult, routesResult] = await Promise.all([
-            supabase.from('orders').select('id, status, driver_id').eq('delivery_date', date),
+            supabase.from('orders').select('id, status, driver_id')
+              .gte('delivery_date', startDate).lte('delivery_date', endDate),
             supabase.from('drivers').select('id, is_active, is_available_today'),
-            supabase.from('routes').select('id, status, total_distance_km, estimated_fuel_cost, estimated_duration_minutes, driver_id').eq('delivery_date', date)
+            supabase.from('routes').select('id, status, total_distance_km, estimated_fuel_cost, estimated_duration_minutes, driver_id')
+              .gte('delivery_date', startDate).lte('delivery_date', endDate)
           ]);
 
           const orders = ordersResult.data || [];

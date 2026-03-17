@@ -233,6 +233,61 @@ class WooCommerceService {
   }
 
   /**
+   * Push a delivery status update back to WooCommerce.
+   * Called after a driver marks an order as delivered or failed.
+   *
+   * @param {string} storeId        - Registered store ID
+   * @param {string|number} wcOrderId - WooCommerce order ID
+   * @param {string} wcStatus       - WooCommerce status ('completed', 'failed', etc.)
+   * @param {object} meta           - Optional { notes, reason } for the order note
+   */
+  async updateOrderStatus(storeId, wcOrderId, wcStatus, meta = {}) {
+    const store = this.stores.get(storeId);
+    if (!store) {
+      console.warn(`WooCommerce sync-back skipped: store "${storeId}" not registered`);
+      return { success: false, message: 'Store not registered' };
+    }
+
+    const url = `${store.baseUrl}/wp-json/wc/v3/orders/${wcOrderId}`;
+    const note = [
+      wcStatus === 'completed' ? 'Order delivered via xRuto.' : 'Delivery failed via xRuto.',
+      meta.reason ? `Reason: ${meta.reason}` : '',
+      meta.notes ? `Notes: ${meta.notes}` : '',
+    ].filter(Boolean).join(' ');
+
+    try {
+      // Update order status
+      await axios.put(
+        url,
+        { status: wcStatus },
+        {
+          auth: { username: store.consumerKey, password: store.consumerSecret },
+          timeout: 10000,
+        }
+      );
+
+      // Add order note
+      if (note) {
+        await axios.post(
+          `${store.baseUrl}/wp-json/wc/v3/orders/${wcOrderId}/notes`,
+          { note, customer_note: false },
+          {
+            auth: { username: store.consumerKey, password: store.consumerSecret },
+            timeout: 10000,
+          }
+        ).catch(() => {}); // Note creation is best-effort
+      }
+
+      console.log(`✅ WooCommerce sync-back: order ${wcOrderId} -> ${wcStatus}`);
+      return { success: true, wcOrderId, wcStatus };
+    } catch (error) {
+      const msg = error.response?.data?.message || error.message;
+      console.error(`WooCommerce sync-back failed for order ${wcOrderId}:`, msg);
+      return { success: false, message: msg };
+    }
+  }
+
+  /**
    * Handle WooCommerce webhook payload.
    * Called when WooCommerce sends a webhook for new/updated orders.
    */

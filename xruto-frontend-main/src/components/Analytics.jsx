@@ -146,7 +146,9 @@ const Analytics = () => {
           <div className="flex items-center justify-between">
             <div>
               <h1 className="text-xl font-bold">Analytics Dashboard</h1>
-              <p className="text-gray-400 text-sm">Delivery performance & route insights</p>
+              <p className="text-gray-400 text-sm">
+                {dateRange === 'today' ? 'Today' : dateRange === 'week' ? 'Last 7 days' : 'Last 30 days'} · delivery performance &amp; route insights
+              </p>
             </div>
             <div className="flex gap-1 bg-gray-800 rounded-lg p-0.5">
               {['today', 'week', 'month'].map(range => (

@@ -4,6 +4,24 @@ import ClusterMap from './ClusterMap';
 // Get API URL from environment variables
 const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:5000/api';
 
+// Build a navigation URL for a single stop using the admin's preferred map app
+const buildStopNavUrl = (order, navApp = 'here') => {
+  const addr = encodeURIComponent(order.delivery_address || '');
+  if (order.latitude && order.longitude && !isNaN(order.latitude) && !isNaN(order.longitude)) {
+    const lat = parseFloat(order.latitude);
+    const lng = parseFloat(order.longitude);
+    if (navApp === 'google') {
+      return `https://www.google.com/maps/dir/?api=1&destination=${lat},${lng}`;
+    }
+    return `https://wego.here.com/directions/drive/mylocation/${lat},${lng}`;
+  }
+  // Fallback to address-based lookup
+  if (navApp === 'google') {
+    return `https://www.google.com/maps/search/?api=1&query=${addr}`;
+  }
+  return `https://wego.here.com/search/${addr}`;
+};
+
 // API service for driver routes
 const driverAPI = {
   // Get all generated routes (from Orders page)
@@ -282,9 +300,22 @@ const DriverRoutes = () => {
   const [selectedRoute, setSelectedRoute] = useState(null);
   const [liveUpdateEnabled, setLiveUpdateEnabled] = useState(false);
   const [lastUpdate, setLastUpdate] = useState(new Date());
+  // Navigation app preference fetched from admin settings
+  const [navApp, setNavApp] = useState('here'); // 'here' | 'google'
   // Dialog state
   const [failureDialog, setFailureDialog] = useState(null); // { orderId, customerName }
   const [deliveryDialog, setDeliveryDialog] = useState(null); // { orderId, customerName }
+
+  // Fetch admin nav preference once on mount
+  useEffect(() => {
+    fetch(`${API_BASE_URL}/admin/settings`)
+      .then(r => r.ok ? r.json() : null)
+      .then(data => {
+        const pref = data?.settings?.navigation_app_preference || 'here';
+        setNavApp(pref);
+      })
+      .catch(() => {}); // non-fatal
+  }, []);
 
   // Load driver routes
   const loadDriverRoutes = async () => {
@@ -392,67 +423,55 @@ const DriverRoutes = () => {
 
   // Navigate to full route
   const navigateToRoute = (route) => {
-    const depot = { lat: 53.3808256, lng: -2.575416 }; // Warrington depot
-    
-    // Get all orders from all segments
+    const depot = { lat: 53.3808256, lng: -2.575416 };
     const allOrders = route.route_segments?.flatMap(segment => segment.orders || []) || [];
-    
-    if (allOrders.length === 0) {
-      alert('No orders found in this route');
-      return;
-    }
+    if (allOrders.length === 0) { alert('No orders found in this route'); return; }
 
-    // Filter orders with valid coordinates
-    const ordersWithCoords = allOrders.filter(order => 
-      order.latitude && order.longitude && 
-      !isNaN(order.latitude) && !isNaN(order.longitude)
-    );
-    
-    if (ordersWithCoords.length === 0) {
-      alert('No valid coordinates found for orders in this route');
-      return;
+    const valid = allOrders.filter(o => o.latitude && o.longitude && !isNaN(o.latitude) && !isNaN(o.longitude));
+    if (valid.length === 0) { alert('No valid coordinates found for orders in this route'); return; }
+
+    let navigationUrl;
+    if (navApp === 'google') {
+      // Google Maps multi-stop: origin + waypoints + destination
+      const origin = `${depot.lat},${depot.lng}`;
+      const destination = `${depot.lat},${depot.lng}`;
+      const waypoints = valid.map(o => `${parseFloat(o.latitude)},${parseFloat(o.longitude)}`).join('|');
+      navigationUrl = `https://www.google.com/maps/dir/?api=1&origin=${origin}&destination=${destination}&waypoints=${encodeURIComponent(waypoints)}&travelmode=driving`;
+    } else {
+      const waypoints = valid.map(o => `${parseFloat(o.latitude)},${parseFloat(o.longitude)}`).join(',');
+      navigationUrl = `https://wego.here.com/directions/mix/${depot.lat},${depot.lng}/${waypoints}/${depot.lat},${depot.lng}`;
     }
-    
-    // Create navigation URL
-    const waypoints = ordersWithCoords
-      .map(order => `${order.latitude},${order.longitude}`)
-      .join(',');
-    
-    const navigationUrl = `https://wego.here.com/directions/mix/${depot.lat},${depot.lng}/${waypoints}/${depot.lat},${depot.lng}`;
-    console.log('Opening navigation URL:', navigationUrl);
     window.open(navigationUrl, '_blank');
   };
 
   // Navigate to specific segment
   const navigateToSegment = (route, segment) => {
     const segmentOrders = segment.orders || [];
-    const depot = { lat: 53.3808256, lng: -2.575416 }; // Warrington depot
-    
-    if (segmentOrders.length === 0) {
-      alert('No orders found in this segment');
-      return;
-    }
+    const depot = { lat: 53.3808256, lng: -2.575416 };
+    if (segmentOrders.length === 0) { alert('No orders found in this segment'); return; }
 
-    // Filter orders with valid coordinates
-    const ordersWithCoords = segmentOrders.filter(order => 
-      order.latitude && order.longitude && 
-      !isNaN(order.latitude) && !isNaN(order.longitude)
-    );
-    
-    if (ordersWithCoords.length === 0) {
-      alert('No valid coordinates found for orders in this segment');
-      return;
+    const valid = segmentOrders.filter(o => o.latitude && o.longitude && !isNaN(o.latitude) && !isNaN(o.longitude));
+    if (valid.length === 0) { alert('No valid coordinates found for orders in this segment'); return; }
+
+    let navigationUrl;
+    if (navApp === 'google') {
+      const origin = `${depot.lat},${depot.lng}`;
+      const destination = `${depot.lat},${depot.lng}`;
+      const waypoints = valid.map(o => `${parseFloat(o.latitude)},${parseFloat(o.longitude)}`).join('|');
+      navigationUrl = `https://www.google.com/maps/dir/?api=1&origin=${origin}&destination=${destination}&waypoints=${encodeURIComponent(waypoints)}&travelmode=driving`;
+    } else {
+      const waypoints = valid.map(o => `${parseFloat(o.latitude)},${parseFloat(o.longitude)}`).join(',');
+      navigationUrl = `https://wego.here.com/directions/mix/${depot.lat},${depot.lng}/${waypoints}/${depot.lat},${depot.lng}`;
     }
-    
-    // Create navigation URL for segment
-    const waypoints = ordersWithCoords
-      .map(order => `${order.latitude},${order.longitude}`)
-      .join(',');
-    
-    const navigationUrl = `https://wego.here.com/directions/mix/${depot.lat},${depot.lng}/${waypoints}/${depot.lat},${depot.lng}`;
-    console.log('Opening segment navigation URL:', navigationUrl);
     window.open(navigationUrl, '_blank');
   };
+
+  // Navigate to a single stop
+  const navigateToStop = (order) => {
+    const url = buildStopNavUrl(order, navApp);
+    window.open(url, '_blank');
+  };
+
 
   // Update delivery status – accepts optional metadata (notes, failure reason)
   const updateOrderStatus = async (orderId, newStatus, metadata = {}) => {
@@ -718,6 +737,14 @@ const DriverRoutes = () => {
                             <span className={`px-2 py-1 rounded-full text-xs font-medium text-white ${getStatusColor(order.status)}`}>
                               {getStatusText(order.status)}
                             </span>
+                            {/* Per-stop navigation button – always visible */}
+                            <button
+                              onClick={() => navigateToStop(order)}
+                              title={`Navigate to ${order.customer_name}`}
+                              className="px-2 py-1 bg-blue-600 text-white text-xs rounded hover:bg-blue-700 transition-colors flex items-center gap-1"
+                            >
+                              🧭 Nav
+                            </button>
                             {order.status === 'pending' && (
                               <>
                                 <button
