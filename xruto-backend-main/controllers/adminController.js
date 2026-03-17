@@ -1,4 +1,5 @@
-﻿const { getSupabase } = require('../config/supabase');
+const { getSupabase } = require('../config/supabase');
+const { inMemorySettings, inMemoryDrivers } = require('../state/routeState');
 
 const adminController = {
   // GET /api/admin/settings
@@ -20,11 +21,12 @@ const adminController = {
             settings: settings || adminController._defaultSettings()
           });
         } catch (dbError) {
-          console.error('Supabase settings error, using defaults:', dbError.message);
+          console.error('Supabase settings error, using in-memory settings:', dbError.message);
         }
       }
 
-      res.json({ success: true, settings: adminController._defaultSettings() });
+      // Return persisted in-memory settings (not just hard-coded defaults)
+      res.json({ success: true, settings: { ...inMemorySettings } });
     } catch (error) {
       console.error('Get settings error:', error);
       res.status(500).json({ success: false, message: 'Failed to fetch settings', error: error.message });
@@ -61,7 +63,9 @@ const adminController = {
         }
       }
 
-      res.json({ success: true, message: 'Settings updated (no database configured)', settings: req.body });
+      // Persist in-memory so changes survive without a database
+      Object.assign(inMemorySettings, req.body);
+      res.json({ success: true, message: 'Settings updated (stored in-memory)', settings: { ...inMemorySettings } });
     } catch (error) {
       console.error('Update settings error:', error);
       res.status(500).json({ success: false, message: 'Failed to update settings', error: error.message });
@@ -218,13 +222,15 @@ const adminController = {
 
       res.json({
         success: true,
-        drivers: [{
-          id: '1', name: 'John Driver', email: 'john.driver@xruto.com',
-          phone: '07123456789', first_name: 'John', last_name: 'Driver',
-          depot_id: '1', mpg: 35.5, vehicle_type: 'van',
-          is_active: true, is_available_today: true,
-          details: 'Warrington Distribution Center, 35.5 MPG'
-        }]
+        drivers: inMemoryDrivers.size > 0
+          ? Array.from(inMemoryDrivers.values()).filter(d => d.is_active)
+          : [{
+              id: '1', name: 'John Driver', email: 'john.driver@xruto.com',
+              phone: '07123456789', first_name: 'John', last_name: 'Driver',
+              depot_id: '1', mpg: 35.5, vehicle_type: 'van',
+              is_active: true, is_available_today: true,
+              details: 'Warrington Distribution Center, 35.5 MPG'
+            }]
       });
     } catch (error) {
       console.error('Get drivers error:', error);
@@ -282,9 +288,27 @@ const adminController = {
         }
       }
 
+      const newDriver = {
+        id: Date.now().toString(),
+        name: firstName + ' ' + lastName,
+        first_name: firstName,
+        last_name: lastName,
+        email,
+        phone: phone || null,
+        depot_id: depotId || null,
+        mpg: mpg ? parseFloat(mpg) : 30.0,
+        vehicle_type: vehicleType || 'van',
+        vehicle_capacity: vehicleCapacity ? parseInt(vehicleCapacity) : 50,
+        license_plate: licensePlate || null,
+        is_active: true,
+        is_available_today: true,
+        details: 'Test Depot, ' + (mpg || 30) + ' MPG',
+      };
+      inMemoryDrivers.set(newDriver.id, newDriver);
+
       res.status(201).json({
         success: true, message: 'Driver added (no database configured)',
-        driver: { id: Date.now().toString(), name: firstName + ' ' + lastName, details: 'Test Depot, 30 MPG', ...req.body }
+        driver: newDriver,
       });
     } catch (error) {
       console.error('Add driver error:', error);
@@ -406,6 +430,15 @@ const adminController = {
         });
       }
 
+      // Update in-memory store for no-DB mode
+      const existing = inMemoryDrivers.get(id);
+      if (existing) {
+        const updated = { ...existing, ...updates, id };
+        if (updates.firstName) { updated.first_name = updates.firstName; updated.name = (updates.firstName + ' ' + (updates.lastName || existing.last_name)).trim(); }
+        if (updates.lastName) { updated.last_name = updates.lastName; updated.name = ((updates.firstName || existing.first_name) + ' ' + updates.lastName).trim(); }
+        inMemoryDrivers.set(id, updated);
+      }
+
       res.json({ success: true, message: 'Driver updated (no database configured)', driver: { id, ...updates } });
     } catch (error) {
       console.error('Update driver error:', error);
@@ -431,6 +464,10 @@ const adminController = {
 
         return res.json({ success: true, message: 'Driver removed successfully' });
       }
+
+      // Mark as inactive in in-memory store for no-DB mode
+      const driver = inMemoryDrivers.get(id);
+      if (driver) inMemoryDrivers.set(id, { ...driver, is_active: false });
 
       res.json({ success: true, message: 'Driver removed (no database configured)' });
     } catch (error) {

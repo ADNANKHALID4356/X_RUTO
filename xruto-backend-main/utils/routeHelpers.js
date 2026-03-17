@@ -89,13 +89,17 @@ function generateNavigationURL(depot, waypoints, detailed = false) {
 }
 
 /**
- * Estimate route metrics from order count (for mock / demo mode)
+ * Estimate route metrics from order count (for mock / demo mode).
+ * @param {number} orderCount - Number of stops
+ * @param {number} [fuelPricePerLitre=1.45] - Fuel price in £/litre (passed from settings)
+ * @param {number} [mpg=30] - Vehicle MPG (passed from driver settings)
  */
-function calculateRealisticMetrics(orderCount) {
+function calculateRealisticMetrics(orderCount, fuelPricePerLitre = 1.45, mpg = 30) {
   const distance_km = Math.round((5 + orderCount * 2.5) * 100) / 100;
   const distance_miles = Math.round(distance_km * 0.621371 * 100) / 100;
   const time_minutes = Math.round(15 + orderCount * 7);
-  const fuel_cost = Math.round((distance_miles / 30) * 1.45 * 100) / 100;
+  // Litres per mile: 1 gallon = 4.54609 litres; cost = (miles / mpg) * gallons_per_mile_to_litres * price
+  const fuel_cost = Math.round((distance_miles / mpg) * 4.54609 * fuelPricePerLitre * 100) / 100;
 
   return { distance_km, distance_miles, time_minutes, fuel_cost };
 }

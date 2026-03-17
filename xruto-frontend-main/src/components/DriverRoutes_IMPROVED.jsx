@@ -1,7 +1,26 @@
 import React, { useState, useEffect } from 'react';
+import ClusterMap from './ClusterMap';
 
 // Get API URL from environment variables
 const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:5000/api';
+
+// Build a navigation URL for a single stop using the admin's preferred map app
+const buildStopNavUrl = (order, navApp = 'here') => {
+  const addr = encodeURIComponent(order.delivery_address || '');
+  if (order.latitude && order.longitude && !isNaN(order.latitude) && !isNaN(order.longitude)) {
+    const lat = parseFloat(order.latitude);
+    const lng = parseFloat(order.longitude);
+    if (navApp === 'google') {
+      return `https://www.google.com/maps/dir/?api=1&destination=${lat},${lng}`;
+    }
+    return `https://wego.here.com/directions/drive/mylocation/${lat},${lng}`;
+  }
+  // Fallback to address-based lookup
+  if (navApp === 'google') {
+    return `https://www.google.com/maps/search/?api=1&query=${addr}`;
+  }
+  return `https://wego.here.com/search/${addr}`;
+};
 
 // API service for driver routes
 const driverAPI = {
@@ -9,7 +28,7 @@ const driverAPI = {
   getAllRoutes: async (date = new Date().toISOString().split('T')[0]) => {
     try {
       // First try to get generated routes
-      const routesResponse = await fetch(`${API_BASE_URL}/orders/get-routes?date=${date}`);
+      const routesResponse = await fetch(`${API_BASE_URL}/orders/routes?date=${date}`);
       if (routesResponse.ok) {
         const routesResult = await routesResponse.json();
         if (routesResult.success && routesResult.routes.length > 0) {
@@ -33,15 +52,15 @@ const driverAPI = {
   },
 
   // Update delivery status from driver app
-  updateDeliveryStatus: async (orderId, status, location = null) => {
+  updateDeliveryStatus: async (orderId, status, metadata = {}) => {
     try {
       const response = await fetch(`${API_BASE_URL}/orders/delivery-status/${orderId}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           status: status,
-          location: location,
-          timestamp: new Date().toISOString()
+          timestamp: new Date().toISOString(),
+          ...metadata
         })
       });
       
@@ -132,6 +151,108 @@ const DepotReturnSegments = ({ route, onNavigateSegment }) => {
   );
 };
 
+// ── Failure Reason Dialog ─────────────────────────────────────────────────────
+const FAILURE_REASONS = [
+  'No answer / not home',
+  'Wrong address',
+  'Access issue (gate/intercom)',
+  'Customer refused delivery',
+  'Damaged item',
+  'Incorrect order',
+  'Other',
+];
+
+const FailureReasonDialog = ({ orderId, customerName, onConfirm, onCancel }) => {
+  const [reason, setReason] = useState(FAILURE_REASONS[0]);
+  const [notes, setNotes] = useState('');
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 px-4">
+      <div className="bg-white rounded-xl shadow-2xl w-full max-w-sm p-5">
+        <h3 className="text-lg font-bold text-gray-800 mb-1">Mark as Failed</h3>
+        <p className="text-sm text-gray-500 mb-4">
+          Delivery for <strong>{customerName}</strong>
+        </p>
+
+        <label className="block text-sm font-medium text-gray-700 mb-1">Reason</label>
+        <select
+          value={reason}
+          onChange={(e) => setReason(e.target.value)}
+          className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm mb-3 focus:ring-2 focus:ring-red-400 focus:outline-none"
+        >
+          {FAILURE_REASONS.map((r) => (
+            <option key={r} value={r}>{r}</option>
+          ))}
+        </select>
+
+        <label className="block text-sm font-medium text-gray-700 mb-1">Additional Notes <span className="text-gray-400">(optional)</span></label>
+        <textarea
+          value={notes}
+          onChange={(e) => setNotes(e.target.value)}
+          rows={2}
+          placeholder="e.g. left card through door"
+          className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm mb-4 focus:ring-2 focus:ring-red-400 focus:outline-none"
+        />
+
+        <div className="flex gap-2">
+          <button
+            onClick={() => onConfirm(orderId, 'failed', { reason, notes })}
+            className="flex-1 bg-red-500 text-white py-2 rounded-lg font-medium hover:bg-red-600 transition-colors text-sm"
+          >
+            Confirm Failed
+          </button>
+          <button
+            onClick={onCancel}
+            className="flex-1 border border-gray-300 text-gray-700 py-2 rounded-lg font-medium hover:bg-gray-50 transition-colors text-sm"
+          >
+            Cancel
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+// ── Delivery Notes Dialog ─────────────────────────────────────────────────────
+const DeliveryNotesDialog = ({ orderId, customerName, onConfirm, onCancel }) => {
+  const [notes, setNotes] = useState('');
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 px-4">
+      <div className="bg-white rounded-xl shadow-2xl w-full max-w-sm p-5">
+        <h3 className="text-lg font-bold text-gray-800 mb-1">Confirm Delivery</h3>
+        <p className="text-sm text-gray-500 mb-4">
+          <strong>{customerName}</strong>
+        </p>
+
+        <label className="block text-sm font-medium text-gray-700 mb-1">Delivery Notes <span className="text-gray-400">(optional)</span></label>
+        <textarea
+          value={notes}
+          onChange={(e) => setNotes(e.target.value)}
+          rows={2}
+          placeholder="e.g. left with neighbour, signed by J. Smith"
+          className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm mb-4 focus:ring-2 focus:ring-green-400 focus:outline-none"
+        />
+
+        <div className="flex gap-2">
+          <button
+            onClick={() => onConfirm(orderId, 'delivered', { notes })}
+            className="flex-1 bg-green-500 text-white py-2 rounded-lg font-medium hover:bg-green-600 transition-colors text-sm"
+          >
+            ✓ Delivered
+          </button>
+          <button
+            onClick={onCancel}
+            className="flex-1 border border-gray-300 text-gray-700 py-2 rounded-lg font-medium hover:bg-gray-50 transition-colors text-sm"
+          >
+            Cancel
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+};
+
 // Status color mapping
 const getStatusColor = (status) => {
   switch (status) {
@@ -179,6 +300,22 @@ const DriverRoutes = () => {
   const [selectedRoute, setSelectedRoute] = useState(null);
   const [liveUpdateEnabled, setLiveUpdateEnabled] = useState(false);
   const [lastUpdate, setLastUpdate] = useState(new Date());
+  // Navigation app preference fetched from admin settings
+  const [navApp, setNavApp] = useState('here'); // 'here' | 'google'
+  // Dialog state
+  const [failureDialog, setFailureDialog] = useState(null); // { orderId, customerName }
+  const [deliveryDialog, setDeliveryDialog] = useState(null); // { orderId, customerName }
+
+  // Fetch admin nav preference once on mount
+  useEffect(() => {
+    fetch(`${API_BASE_URL}/admin/settings`)
+      .then(r => r.ok ? r.json() : null)
+      .then(data => {
+        const pref = data?.settings?.navigation_app_preference || 'here';
+        setNavApp(pref);
+      })
+      .catch(() => {}); // non-fatal
+  }, []);
 
   // Load driver routes
   const loadDriverRoutes = async () => {
@@ -286,79 +423,66 @@ const DriverRoutes = () => {
 
   // Navigate to full route
   const navigateToRoute = (route) => {
-    const depot = { lat: 53.3808256, lng: -2.575416 }; // Warrington depot
-    
-    // Get all orders from all segments
+    const depot = { lat: 53.3808256, lng: -2.575416 };
     const allOrders = route.route_segments?.flatMap(segment => segment.orders || []) || [];
-    
-    if (allOrders.length === 0) {
-      alert('No orders found in this route');
-      return;
-    }
+    if (allOrders.length === 0) { alert('No orders found in this route'); return; }
 
-    // Filter orders with valid coordinates
-    const ordersWithCoords = allOrders.filter(order => 
-      order.latitude && order.longitude && 
-      !isNaN(order.latitude) && !isNaN(order.longitude)
-    );
-    
-    if (ordersWithCoords.length === 0) {
-      alert('No valid coordinates found for orders in this route');
-      return;
+    const valid = allOrders.filter(o => o.latitude && o.longitude && !isNaN(o.latitude) && !isNaN(o.longitude));
+    if (valid.length === 0) { alert('No valid coordinates found for orders in this route'); return; }
+
+    let navigationUrl;
+    if (navApp === 'google') {
+      // Google Maps multi-stop: origin + waypoints + destination
+      const origin = `${depot.lat},${depot.lng}`;
+      const destination = `${depot.lat},${depot.lng}`;
+      const waypoints = valid.map(o => `${parseFloat(o.latitude)},${parseFloat(o.longitude)}`).join('|');
+      navigationUrl = `https://www.google.com/maps/dir/?api=1&origin=${origin}&destination=${destination}&waypoints=${encodeURIComponent(waypoints)}&travelmode=driving`;
+    } else {
+      const waypoints = valid.map(o => `${parseFloat(o.latitude)},${parseFloat(o.longitude)}`).join(',');
+      navigationUrl = `https://wego.here.com/directions/mix/${depot.lat},${depot.lng}/${waypoints}/${depot.lat},${depot.lng}`;
     }
-    
-    // Create navigation URL
-    const waypoints = ordersWithCoords
-      .map(order => `${order.latitude},${order.longitude}`)
-      .join(',');
-    
-    const navigationUrl = `https://wego.here.com/directions/mix/${depot.lat},${depot.lng}/${waypoints}/${depot.lat},${depot.lng}`;
-    console.log('Opening navigation URL:', navigationUrl);
     window.open(navigationUrl, '_blank');
   };
 
   // Navigate to specific segment
   const navigateToSegment = (route, segment) => {
     const segmentOrders = segment.orders || [];
-    const depot = { lat: 53.3808256, lng: -2.575416 }; // Warrington depot
-    
-    if (segmentOrders.length === 0) {
-      alert('No orders found in this segment');
-      return;
-    }
+    const depot = { lat: 53.3808256, lng: -2.575416 };
+    if (segmentOrders.length === 0) { alert('No orders found in this segment'); return; }
 
-    // Filter orders with valid coordinates
-    const ordersWithCoords = segmentOrders.filter(order => 
-      order.latitude && order.longitude && 
-      !isNaN(order.latitude) && !isNaN(order.longitude)
-    );
-    
-    if (ordersWithCoords.length === 0) {
-      alert('No valid coordinates found for orders in this segment');
-      return;
+    const valid = segmentOrders.filter(o => o.latitude && o.longitude && !isNaN(o.latitude) && !isNaN(o.longitude));
+    if (valid.length === 0) { alert('No valid coordinates found for orders in this segment'); return; }
+
+    let navigationUrl;
+    if (navApp === 'google') {
+      const origin = `${depot.lat},${depot.lng}`;
+      const destination = `${depot.lat},${depot.lng}`;
+      const waypoints = valid.map(o => `${parseFloat(o.latitude)},${parseFloat(o.longitude)}`).join('|');
+      navigationUrl = `https://www.google.com/maps/dir/?api=1&origin=${origin}&destination=${destination}&waypoints=${encodeURIComponent(waypoints)}&travelmode=driving`;
+    } else {
+      const waypoints = valid.map(o => `${parseFloat(o.latitude)},${parseFloat(o.longitude)}`).join(',');
+      navigationUrl = `https://wego.here.com/directions/mix/${depot.lat},${depot.lng}/${waypoints}/${depot.lat},${depot.lng}`;
     }
-    
-    // Create navigation URL for segment
-    const waypoints = ordersWithCoords
-      .map(order => `${order.latitude},${order.longitude}`)
-      .join(',');
-    
-    const navigationUrl = `https://wego.here.com/directions/mix/${depot.lat},${depot.lng}/${waypoints}/${depot.lat},${depot.lng}`;
-    console.log('Opening segment navigation URL:', navigationUrl);
     window.open(navigationUrl, '_blank');
   };
 
-  // Update delivery status
-  const updateOrderStatus = async (orderId, newStatus) => {
+  // Navigate to a single stop
+  const navigateToStop = (order) => {
+    const url = buildStopNavUrl(order, navApp);
+    window.open(url, '_blank');
+  };
+
+
+  // Update delivery status – accepts optional metadata (notes, failure reason)
+  const updateOrderStatus = async (orderId, newStatus, metadata = {}) => {
+    // Close any open dialogs
+    setFailureDialog(null);
+    setDeliveryDialog(null);
     try {
-      console.log(`Updating order ${orderId} to status: ${newStatus}`);
-      await driverAPI.updateDeliveryStatus(orderId, newStatus);
-      
+      console.log(`Updating order ${orderId} to status: ${newStatus}`, metadata);
+      await driverAPI.updateDeliveryStatus(orderId, newStatus, metadata);
       // Refresh routes after status update to show progress
       await loadDriverRoutes();
-      
-      // Show success message
-      alert(`Order marked as ${newStatus}`);
     } catch (error) {
       console.error('Failed to update order status:', error);
       alert(`Failed to update order status: ${error.message}`);
@@ -580,6 +704,16 @@ const DriverRoutes = () => {
                     onNavigateSegment={navigateToSegment}
                   />
 
+                  {/* Route Map */}
+                  <div className="mt-4">
+                    <h3 className="text-base font-semibold text-gray-800 mb-2">Route Map</h3>
+                    <ClusterMap
+                      routes={[{ ...route, orders: route.route_segments?.flatMap(s => s.orders || []) }]}
+                      height="260px"
+                      showLegend={false}
+                    />
+                  </div>
+
                   {/* Orders List */}
                   <div className="mt-6">
                     <h3 className="text-lg font-semibold text-gray-800 mb-4">Order Details</h3>
@@ -591,19 +725,41 @@ const DriverRoutes = () => {
                             <div>
                               <div className="font-medium text-gray-800">{order.customer_name}</div>
                               <div className="text-sm text-gray-600">{order.delivery_address}</div>
+                              {order.customer_phone && (
+                                <div className="text-xs text-gray-500">📞 {order.customer_phone}</div>
+                              )}
+                              {order.special_instructions && (
+                                <div className="text-xs text-orange-600 mt-0.5">⚠ {order.special_instructions}</div>
+                              )}
                             </div>
                           </div>
                           <div className="flex items-center space-x-2">
                             <span className={`px-2 py-1 rounded-full text-xs font-medium text-white ${getStatusColor(order.status)}`}>
                               {getStatusText(order.status)}
                             </span>
+                            {/* Per-stop navigation button – always visible */}
+                            <button
+                              onClick={() => navigateToStop(order)}
+                              title={`Navigate to ${order.customer_name}`}
+                              className="px-2 py-1 bg-blue-600 text-white text-xs rounded hover:bg-blue-700 transition-colors flex items-center gap-1"
+                            >
+                              🧭 Nav
+                            </button>
                             {order.status === 'pending' && (
-                              <button
-                                onClick={() => updateOrderStatus(order.id, 'delivered')}
-                                className="px-3 py-1 bg-green-500 text-white text-sm rounded hover:bg-green-600 transition-colors"
-                              >
-                                Mark Delivered
-                              </button>
+                              <>
+                                <button
+                                  onClick={() => setDeliveryDialog({ orderId: order.id, customerName: order.customer_name })}
+                                  className="px-3 py-1 bg-green-500 text-white text-sm rounded hover:bg-green-600 transition-colors"
+                                >
+                                  ✓ Delivered
+                                </button>
+                                <button
+                                  onClick={() => setFailureDialog({ orderId: order.id, customerName: order.customer_name })}
+                                  className="px-3 py-1 bg-red-500 text-white text-sm rounded hover:bg-red-600 transition-colors"
+                                >
+                                  ✗ Failed
+                                </button>
+                              </>
                             )}
                           </div>
                         </div>
@@ -616,6 +772,24 @@ const DriverRoutes = () => {
           ))}
         </div>
       </div>
+
+      {/* Dialogs */}
+      {deliveryDialog && (
+        <DeliveryNotesDialog
+          orderId={deliveryDialog.orderId}
+          customerName={deliveryDialog.customerName}
+          onConfirm={updateOrderStatus}
+          onCancel={() => setDeliveryDialog(null)}
+        />
+      )}
+      {failureDialog && (
+        <FailureReasonDialog
+          orderId={failureDialog.orderId}
+          customerName={failureDialog.customerName}
+          onConfirm={updateOrderStatus}
+          onCancel={() => setFailureDialog(null)}
+        />
+      )}
     </div>
   );
 };

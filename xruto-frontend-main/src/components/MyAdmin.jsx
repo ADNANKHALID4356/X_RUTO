@@ -1,6 +1,7 @@
 
 import React, { useState, useEffect } from 'react';
 import { adminAPI } from '../services/api';
+import WooCommerceStores from './WooCommerceStores';
 
 // Enhanced SVG Icons
 const InfoIcon = ({ className, onClick }) => (
@@ -365,6 +366,20 @@ const MyAdmin = ({ onNavigateToDashboard }) => {
     }
   };
 
+  const handleToggleDriverAvailability = async (driverId, currentAvailability) => {
+    try {
+      setSaving(true);
+      await adminAPI.updateDriver(driverId, { is_available_today: !currentAvailability });
+      setDrivers(prev => prev.map(d => d.id === driverId ? { ...d, is_available_today: !currentAvailability } : d));
+      setSuccess('Driver availability updated');
+      setTimeout(() => setSuccess(''), 2000);
+    } catch (error) {
+      setError('Failed to update driver availability: ' + error.message);
+    } finally {
+      setSaving(false);
+    }
+  };
+
   const showHelp = (helpText) => {
     if (helpEnabled) {
       setShowTooltip(helpText);
@@ -445,7 +460,7 @@ const MyAdmin = ({ onNavigateToDashboard }) => {
       <div className="p-4 space-y-6">
         {/* Enhanced General Settings */}
         <Section title="General Settings">
-          <SettingRow label="Include Admin in Delivery Team?" helpText="Allow admin to be assigned as a driver for deliveries">
+          <SettingRow label="Include Admin in Delivery Team?" helpText="Allow admin to be assigned as a driver for deliveries" showHelp={showHelp}>
             <ToggleSwitch 
               isOn={settings.include_admin_as_driver || false}
               onChange={(value) => handleSettingChange('include_admin_as_driver', value)}
@@ -453,7 +468,7 @@ const MyAdmin = ({ onNavigateToDashboard }) => {
             />
           </SettingRow>
           
-          <SettingRow label="How Many Drivers Today?" helpText="Set the number of drivers available for today's deliveries">
+          <SettingRow label="How Many Drivers Today?" helpText="Set the number of drivers available for today's deliveries" showHelp={showHelp}>
             <DriverCountSelector 
               value={settings.drivers_today_count || 3}
               onChange={(value) => handleSettingChange('drivers_today_count', value)}
@@ -489,7 +504,7 @@ const MyAdmin = ({ onNavigateToDashboard }) => {
             />
           </div>
 
-          <SettingRow label="Enable Stock Refill Logic?" helpText="Drivers will return to depot when they run out of meals/stock">
+          <SettingRow label="Enable Stock Refill Logic?" helpText="Drivers will return to depot when they run out of meals/stock" showHelp={showHelp}>
             <ToggleSwitch 
               isOn={settings.enable_stock_refill || false}
               onChange={(value) => handleSettingChange('enable_stock_refill', value)}
@@ -515,7 +530,7 @@ const MyAdmin = ({ onNavigateToDashboard }) => {
             showHelp={showHelp}
           />
 
-          <SettingRow label="Auto-Assign Routes?" helpText="Automatically assign routes to available drivers using load balancing">
+          <SettingRow label="Auto-Assign Routes?" helpText="Automatically assign routes to available drivers using load balancing" showHelp={showHelp}>
             <ToggleSwitch 
               isOn={settings.auto_assign_routes || false}
               onChange={(value) => handleSettingChange('auto_assign_routes', value)}
@@ -639,6 +654,7 @@ const MyAdmin = ({ onNavigateToDashboard }) => {
               onSave={handleSaveDriverEdit}
               onCancel={handleCancelDriverEdit}
               onRemove={() => handleRemoveDriver(driver.id)}
+              onToggleAvailability={() => handleToggleDriverAvailability(driver.id, driver.is_available_today !== false)}
               depots={depots}
               disabled={saving}
             />
@@ -765,7 +781,7 @@ const MyAdmin = ({ onNavigateToDashboard }) => {
             showHelp={showHelp}
           />
           
-          <SettingRow label="Route Optimization Method" helpText="Choose how routes should be optimized">
+          <SettingRow label="Route Optimization Method" helpText="Choose how routes should be optimized" showHelp={showHelp}>
             <OptimizationMethodSelector
               value={settings.route_optimization_method || 'distance'}
               onChange={(value) => handleSettingChange('route_optimization_method', value)}
@@ -784,7 +800,7 @@ const MyAdmin = ({ onNavigateToDashboard }) => {
 
         {/* Integration Settings Section */}
         <Section title="Integration Settings">
-          <SettingRow label="WooCommerce Integration" helpText="Enable integration with WooCommerce for order sync">
+          <SettingRow label="WooCommerce Integration" helpText="Enable integration with WooCommerce for order sync" showHelp={showHelp}>
             <ToggleSwitch 
               isOn={settings.woocommerce_integration_enabled || false}
               onChange={(value) => handleSettingChange('woocommerce_integration_enabled', value)}
@@ -813,10 +829,15 @@ const MyAdmin = ({ onNavigateToDashboard }) => {
                 max={120}
                 showHelp={showHelp}
               />
+
+              {/* WooCommerce store management */}
+              <div className="mt-4">
+                <WooCommerceStores />
+              </div>
             </div>
           )}
 
-          <SettingRow label="Real-time Tracking" helpText="Enable real-time GPS tracking for drivers">
+          <SettingRow label="Real-time Tracking" helpText="Enable real-time GPS tracking for drivers" showHelp={showHelp}>
             <ToggleSwitch 
               isOn={settings.enable_real_time_tracking || false}
               onChange={(value) => handleSettingChange('enable_real_time_tracking', value)}
@@ -824,7 +845,7 @@ const MyAdmin = ({ onNavigateToDashboard }) => {
             />
           </SettingRow>
 
-          <SettingRow label="Customer Notifications" helpText="Send automatic notifications to customers">
+          <SettingRow label="Customer Notifications" helpText="Send automatic notifications to customers" showHelp={showHelp}>
             <ToggleSwitch 
               isOn={settings.customer_notifications !== false}
               onChange={(value) => handleSettingChange('customer_notifications', value)}
@@ -832,7 +853,7 @@ const MyAdmin = ({ onNavigateToDashboard }) => {
             />
           </SettingRow>
 
-          <SettingRow label="Driver Mobile App" helpText="Enable the mobile app for drivers">
+          <SettingRow label="Driver Mobile App" helpText="Enable the mobile app for drivers" showHelp={showHelp}>
             <ToggleSwitch 
               isOn={settings.driver_app_enabled !== false}
               onChange={(value) => handleSettingChange('driver_app_enabled', value)}
@@ -853,14 +874,14 @@ const Section = ({ title, children }) => (
   </div>
 );
 
-const SettingRow = ({ label, children, helpText }) => (
+const SettingRow = ({ label, children, helpText, showHelp }) => (
   <div className="bg-black/20 p-4 rounded-xl flex justify-between items-center">
     <label className="text-gray-300 flex items-center">
       {label} 
-      {helpText && (
+      {helpText && showHelp && (
         <InfoIcon 
           className="w-4 h-4 ml-1 text-gray-500 cursor-help hover:text-orange-400"
-          onClick={() => showHelp && showHelp(helpText)}
+          onClick={() => showHelp(helpText)}
         />
       )}
     </label>
@@ -1208,7 +1229,8 @@ const EnhancedDriverCard = ({
   onEdit, 
   onSave, 
   onCancel, 
-  onRemove, 
+  onRemove,
+  onToggleAvailability,
   depots, 
   disabled 
 }) => {
@@ -1295,11 +1317,18 @@ const EnhancedDriverCard = ({
         <div className="flex-1">
           <div className="flex items-center space-x-2 mb-2">
             <h4 className="font-semibold text-lg">{driver.name}</h4>
-            {driver.is_available_today === false && (
-              <span className="px-2 py-1 bg-red-500/20 text-red-400 text-xs rounded-full">
-                Unavailable
-              </span>
-            )}
+            <button
+              onClick={() => !disabled && onToggleAvailability && onToggleAvailability()}
+              disabled={disabled}
+              title={driver.is_available_today === false ? 'Mark as available today' : 'Mark as unavailable today'}
+              className={`px-2 py-0.5 text-xs rounded-full transition-colors ${
+                driver.is_available_today === false
+                  ? 'bg-red-500/20 text-red-400 hover:bg-red-500/40'
+                  : 'bg-green-500/20 text-green-400 hover:bg-green-500/40'
+              } ${disabled ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer'}`}
+            >
+              {driver.is_available_today === false ? '⊘ Unavailable' : '✓ Available'}
+            </button>
           </div>
           <p className="text-sm text-gray-400 mb-2">{driver.email}</p>
           <p className="text-xs text-gray-500">{driver.details}</p>

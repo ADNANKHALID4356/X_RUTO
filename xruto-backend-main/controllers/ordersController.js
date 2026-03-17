@@ -1,5 +1,5 @@
-﻿const { getSupabase } = require('../config/supabase');
-const { routeOrdersMap, orderStatusMap } = require('../state/routeState');
+const { getSupabase } = require('../config/supabase');
+const { routeOrdersMap, orderStatusMap, inMemoryOrders, inMemoryDrivers, inMemorySettings } = require('../state/routeState');
 const {
   performKMeansClustering,
   generateNavigationURL,
@@ -7,6 +7,7 @@ const {
   calculateRealisticMetrics
 } = require('../utils/routeHelpers');
 const PDFParserService = require('../services/pdfParser');
+const crypto = require('crypto');
 
 const pdfParserService = new PDFParserService();
 
@@ -48,8 +49,18 @@ const ordersController = {
         }
       }
 
-      // Mock fallback handled by empty response
-      res.json({ success: true, orders: [], postcode_options: [], total_orders: 0, date });
+      // Mock fallback: return orders from in-memory store that match the date
+      const allOrders = Array.from(inMemoryOrders.values()).filter(
+        o => (!o.delivery_date || o.delivery_date === date) &&
+             ['pending', 'confirmed', 'assigned', 'in_route', 'clustered'].includes(o.status)
+      );
+      const processedOrders = allOrders.map(order => ({
+        ...order,
+        postcode_area: (order.postcode || '').split(' ')[0],
+        distance_from_depot_km: calculateDistanceFromDepot(order.latitude, order.longitude)
+      }));
+      const postcodeOptions = [...new Set(processedOrders.map(o => o.postcode_area))].sort();
+      res.json({ success: true, orders: processedOrders, postcode_options: postcodeOptions, total_orders: processedOrders.length, date });
     } catch (error) {
       console.error('Get eligible orders error:', error);
       res.status(500).json({ success: false, message: 'Failed to fetch eligible orders', error: error.message });
@@ -66,7 +77,27 @@ const ordersController = {
         return res.status(400).json({ success: false, message: 'Please select at least one postcode area' });
       }
 
+      // Fetch admin settings (max_deliveries_per_route, etc.)
+      let maxDeliveriesPerRoute = inMemorySettings.max_deliveries_per_route || 25;
+      let effectiveMaxZones = parseInt(max_zones) || 5;
       const supabase = getSupabase();
+
+      if (supabase) {
+        try {
+          const { data: settings } = await supabase.from('settings').select('max_deliveries_per_route, max_routes_per_day').single();
+          if (settings) {
+            if (settings.max_deliveries_per_route) maxDeliveriesPerRoute = parseInt(settings.max_deliveries_per_route);
+            if (settings.max_routes_per_day) effectiveMaxZones = Math.min(effectiveMaxZones, parseInt(settings.max_routes_per_day));
+          }
+        } catch (settingsErr) {
+          console.warn('Could not read settings for clustering, using in-memory settings:', settingsErr.message);
+        }
+      } else {
+        // Use persisted in-memory settings when no database
+        if (inMemorySettings.max_routes_per_day) {
+          effectiveMaxZones = Math.min(effectiveMaxZones, inMemorySettings.max_routes_per_day);
+        }
+      }
 
       if (supabase) {
         try {
@@ -90,8 +121,12 @@ const ordersController = {
             return res.json({ success: true, zones: [], total_orders: 0, message: 'No orders found for selected postcodes' });
           }
 
+          // Determine number of zones needed to respect max_deliveries_per_route
+          const zonesNeeded = Math.ceil(filteredOrders.length / maxDeliveriesPerRoute);
+          const finalMaxZones = Math.max(effectiveMaxZones, zonesNeeded);
+
           const hereService = require('../services/hereAPI');
-          const zones = await hereService.generateOptimizedClustersForArea(filteredOrders, max_zones);
+          const zones = await hereService.generateOptimizedClustersForArea(filteredOrders, finalMaxZones);
 
           return res.json({
             success: true,
@@ -99,6 +134,7 @@ const ordersController = {
             total_orders: filteredOrders.length,
             clustering_method: 'kmeans',
             optimization_score: 85 + Math.random() * 10,
+            max_deliveries_per_route: maxDeliveriesPerRoute,
             message: 'Successfully clustered ' + filteredOrders.length + ' orders into ' + zones.length + ' zones'
           });
         } catch (dbError) {
@@ -106,23 +142,36 @@ const ordersController = {
         }
       }
 
-      // Mock clustering
-      const mockOrders = [
-        { id: '1', customer_name: 'John Smith', delivery_address: '123 Queens Road, Brighton', postcode: 'BN1 1AA', postcode_area: 'BN1', order_value: 45.99, weight: 2.5, special_instructions: 'Ring doorbell twice' },
-        { id: '2', customer_name: 'Sarah Wilson', delivery_address: '456 Western Road, Brighton', postcode: 'BN1 2BB', postcode_area: 'BN1', order_value: 78.50, weight: 3.2, special_instructions: null },
-        { id: '3', customer_name: 'Mike Johnson', delivery_address: '789 North Street, Brighton', postcode: 'BN1 1YZ', postcode_area: 'BN1', order_value: 67.80, weight: 3.5, special_instructions: 'Leave with neighbor if out' },
-        { id: '4', customer_name: 'Emma Brown', delivery_address: '12 Elm Grove, Brighton', postcode: 'BN2 3DE', postcode_area: 'BN2', order_value: 28.75, weight: 1.5, special_instructions: 'Fragile items' }
+      // Demo fallback: use the in-memory order store
+      const allOrders = Array.from(inMemoryOrders.values()).filter(
+        o => selected_postcodes.some(pc => (o.postcode || '').startsWith(pc)) &&
+             ['pending', 'confirmed', 'assigned', 'in_route', 'clustered'].includes(o.status)
+      ).map(order => ({
+        ...order,
+        postcode_area: (order.postcode || '').split(' ')[0],
+        distance_from_depot_km: calculateDistanceFromDepot(order.latitude, order.longitude)
+      }));
+
+      const ordersToCluster = allOrders.length > 0 ? allOrders : [
+        { id: '1', customer_name: 'John Smith', delivery_address: '123 Queens Road, Brighton', postcode: 'BN1 1AA', postcode_area: 'BN1', order_value: 45.99, weight: 2.5, latitude: 53.3810, longitude: -2.5730, special_instructions: 'Ring doorbell twice' },
+        { id: '2', customer_name: 'Sarah Wilson', delivery_address: '456 Western Road, Brighton', postcode: 'BN1 2BB', postcode_area: 'BN1', order_value: 78.50, weight: 3.2, latitude: 53.3815, longitude: -2.5748, special_instructions: null },
+        { id: '3', customer_name: 'Mike Johnson', delivery_address: '789 North Street, Brighton', postcode: 'BN1 1YZ', postcode_area: 'BN1', order_value: 67.80, weight: 3.5, latitude: 53.3806, longitude: -2.5763, special_instructions: 'Leave with neighbor if out' },
+        { id: '4', customer_name: 'Emma Brown', delivery_address: '12 Elm Grove, Brighton', postcode: 'BN2 3DE', postcode_area: 'BN2', order_value: 28.75, weight: 1.5, latitude: 53.3804, longitude: -2.5745, special_instructions: 'Fragile items' }
       ].filter(order => selected_postcodes.includes(order.postcode_area));
 
-      const zones = performKMeansClustering(mockOrders, max_zones);
+      // Determine zones respecting max_deliveries_per_route
+      const zonesNeeded = ordersToCluster.length > 0 ? Math.ceil(ordersToCluster.length / maxDeliveriesPerRoute) : 1;
+      const finalZones = Math.max(effectiveMaxZones, zonesNeeded);
+      const zones = performKMeansClustering(ordersToCluster, finalZones);
 
       res.json({
         success: true,
         zones,
-        total_orders: mockOrders.length,
-        clustering_method: 'mock_kmeans',
+        total_orders: ordersToCluster.length,
+        clustering_method: 'kmeans',
         optimization_score: 88,
-        message: 'Successfully clustered ' + mockOrders.length + ' orders into ' + zones.length + ' zones (demo mode)'
+        max_deliveries_per_route: maxDeliveriesPerRoute,
+        message: 'Successfully clustered ' + ordersToCluster.length + ' orders into ' + zones.length + ' zones (demo mode)'
       });
     } catch (error) {
       console.error('Generate clusters error:', error);
@@ -133,12 +182,40 @@ const ordersController = {
   // POST /api/orders/generate-routes
   async generateRoutes(req, res) {
     try {
-      const { zones } = req.body;
+      const { zones, fuel_price_per_litre, driver_mpg } = req.body;
       if (!zones || zones.length === 0) {
         return res.status(400).json({ success: false, message: 'No zones provided for route generation' });
       }
 
-      console.log('Generating optimized routes for', zones.length, 'zones');
+      // Use fuel price / MPG from request or fetch from settings
+      let fuelPrice = fuel_price_per_litre ? parseFloat(fuel_price_per_litre) : null;
+      let mpg = driver_mpg ? parseFloat(driver_mpg) : null;
+      let stockRefillEnabled = !!inMemorySettings.enable_stock_refill;
+      let maxDeliveriesPerRoute = inMemorySettings.max_deliveries_per_route || 25;
+      let navPreference = inMemorySettings.navigation_app_preference || 'here'; // 'here' | 'google'
+
+      const supabase = getSupabase();
+      if (supabase) {
+        try {
+          const { data: settings } = await supabase
+            .from('settings')
+            .select('default_fuel_price, enable_stock_refill, max_deliveries_per_route, navigation_app_preference')
+            .single();
+          if (settings) {
+            if (!fuelPrice && settings.default_fuel_price) fuelPrice = parseFloat(settings.default_fuel_price);
+            if (settings.enable_stock_refill !== undefined) stockRefillEnabled = !!settings.enable_stock_refill;
+            if (settings.max_deliveries_per_route) maxDeliveriesPerRoute = parseInt(settings.max_deliveries_per_route);
+            if (settings.navigation_app_preference) navPreference = settings.navigation_app_preference;
+          }
+        } catch (dbError) {
+          console.warn('Could not fetch settings for route generation, using in-memory settings:', dbError.message);
+        }
+      }
+
+      fuelPrice = fuelPrice || 1.45;
+      mpg = mpg || 30;
+
+      console.log('Generating optimized routes for', zones.length, 'zones (fuel £' + fuelPrice + '/L, ' + mpg + ' MPG, stockRefill=' + stockRefillEnabled + ', nav=' + navPreference + ')');
       const depot = { latitude: 53.3808256, longitude: -2.575416 };
 
       const routes = zones.map((zone, index) => {
@@ -156,8 +233,71 @@ const ordersController = {
           postcode: order.postcode
         }));
 
-        const navigationResult = generateNavigationURL(depot, waypoints, true);
-        const metrics = calculateRealisticMetrics(zone.total_orders);
+        // Generate navigation URL according to admin's preferred map app
+        let navigationUrl;
+        if (navPreference === 'google') {
+          const depotCoord = `${depot.latitude},${depot.longitude}`;
+          const seen = new Set();
+          const uniqueWps = waypoints.filter(wp => {
+            const key = `${wp.lat},${wp.lng}`;
+            if (seen.has(key)) return false;
+            seen.add(key);
+            return true;
+          });
+          const waypointsParam = uniqueWps.map(wp => `${wp.lat},${wp.lng}`).join('/');
+          navigationUrl = `https://www.google.com/maps/dir/${depotCoord}/${waypointsParam}/${depotCoord}`;
+        } else {
+          const navigationResult = generateNavigationURL(depot, waypoints, true);
+          navigationUrl = navigationResult.url;
+        }
+
+        const navigationStats = (() => {
+          const seen = new Set();
+          let dups = 0;
+          waypoints.forEach(wp => {
+            const key = `${wp.lat},${wp.lng}`;
+            if (seen.has(key)) dups++; else seen.add(key);
+          });
+          return { unique: seen.size, duplicates: dups, expected_points: seen.size + 2 };
+        })();
+
+        const metrics = calculateRealisticMetrics(zone.total_orders, fuelPrice, mpg);
+
+        // Calculate depot return segments if stock refill is enabled
+        const depotReturnsNeeded = stockRefillEnabled
+          ? Math.max(0, Math.ceil(zone.total_orders / maxDeliveriesPerRoute) - 1)
+          : 0;
+
+        const routeSegments = [];
+        if (stockRefillEnabled && zone.orders && zone.orders.length > maxDeliveriesPerRoute) {
+          let segStart = 0;
+          while (segStart < zone.orders.length) {
+            const segOrders = zone.orders.slice(segStart, segStart + maxDeliveriesPerRoute);
+            const segWaypoints = segOrders.map(o => ({
+              lat: parseFloat(o.latitude) || depot.latitude,
+              lng: parseFloat(o.longitude) || depot.longitude
+            }));
+            const segNavResult = generateNavigationURL(depot, segWaypoints, true);
+            routeSegments.push({
+              segment_number: routeSegments.length + 1,
+              orders: segOrders,
+              estimated_duration_minutes: Math.round(10 + segOrders.length * 7),
+              total_distance_km: Math.round((3 + segOrders.length * 2) * 100) / 100,
+              return_to_depot: segStart + maxDeliveriesPerRoute < zone.orders.length,
+              navigation_url: segNavResult.url
+            });
+            segStart += maxDeliveriesPerRoute;
+          }
+        } else {
+          routeSegments.push({
+            segment_number: 1,
+            orders: zone.orders || [],
+            estimated_duration_minutes: metrics.time_minutes,
+            total_distance_km: metrics.distance_km,
+            return_to_depot: false,
+            navigation_url: navigationUrl
+          });
+        }
 
         return {
           route_id: routeId,
@@ -170,13 +310,16 @@ const ordersController = {
           estimated_duration_minutes: metrics.time_minutes,
           estimated_fuel_cost: metrics.fuel_cost,
           route_efficiency_score: Math.min(95, 85 + Math.random() * 10),
-          navigation_url: navigationResult.url,
+          navigation_url: navigationUrl,
+          navigation_app: navPreference,
+          depot_returns_needed: depotReturnsNeeded,
+          route_segments: routeSegments,
           order_summary: {
             total_orders: zone.total_orders,
             actual_orders_count: zone.orders?.length || 0,
-            unique_coordinates: navigationResult.stats.unique,
-            duplicate_coordinates: navigationResult.stats.duplicates,
-            expected_google_maps_points: navigationResult.stats.expected_points
+            unique_coordinates: navigationStats.unique,
+            duplicate_coordinates: navigationStats.duplicates,
+            expected_map_points: navigationStats.expected_points
           },
           driver_id: null,
           driver_name: null,
@@ -184,6 +327,37 @@ const ordersController = {
           source: 'mock_optimization'
         };
       });
+
+      // Persist routes to Supabase when available
+      if (supabase) {
+        const deliveryDate = new Date().toISOString().split('T')[0];
+        const routeInserts = routes.map(r => ({
+          route_name: r.route_name,
+          zone_color: r.zone_color || '#FF6B35',
+          delivery_date: deliveryDate,
+          status: 'generated',
+          total_orders: r.total_orders,
+          total_distance_km: r.total_distance_km,
+          total_distance_miles: r.total_distance_miles,
+          estimated_duration_minutes: r.estimated_duration_minutes,
+          estimated_fuel_cost: r.estimated_fuel_cost,
+          route_efficiency_score: r.route_efficiency_score,
+          navigation_url: r.navigation_url,
+          optimization_method: 'kmeans',
+          depot_returns_needed: r.depot_returns_needed,
+          route_segments: r.route_segments,
+          created_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+        }));
+        supabase.from('routes').insert(routeInserts).then(({ data: inserted, error: insertErr }) => {
+          if (insertErr) {
+            console.warn('Could not persist routes to database:', insertErr.message);
+          } else {
+            // Store DB IDs in routeOrdersMap keys so getDriverRoutes can find them
+            console.log(`✅ Persisted ${routes.length} route(s) to database`);
+          }
+        });
+      }
 
       res.json({
         success: true,
@@ -319,14 +493,33 @@ const ordersController = {
 
       console.log('Dispatching', route_ids.length, 'routes to drivers');
 
-      const dispatchedRoutes = route_ids.map(routeId => ({
-        route_id: routeId,
-        route_name: 'Route ' + routeId,
-        driver_name: 'John Driver',
-        total_orders: Math.floor(Math.random() * 10) + 5,
-        status: 'dispatched',
-        dispatch_time: new Date().toISOString()
-      }));
+      const dispatchTime = new Date().toISOString();
+      const supabase = getSupabase();
+
+      // Update route status to 'dispatched' in Supabase when available
+      if (supabase) {
+        supabase.from('routes')
+          .update({ status: 'dispatched', dispatched_at: dispatchTime, updated_at: dispatchTime })
+          .in('id', route_ids)
+          .then(({ error }) => {
+            if (error) console.warn('Could not update route dispatch status in database:', error.message);
+            else console.log(`✅ Dispatched ${route_ids.length} route(s) in database`);
+          });
+      }
+
+      // Build dispatched route records from in-memory data (with real order counts)
+      const dispatchedRoutes = route_ids.map(routeId => {
+        const orders = routeOrdersMap.get(routeId) || [];
+        return {
+          route_id: routeId,
+          route_name: orders.length > 0
+            ? ('Zone ' + routeId.replace('route_', '') + ' - ' + (orders[0].postcode?.split(' ')[0] || 'Unknown'))
+            : ('Route ' + routeId),
+          total_orders: orders.length,
+          status: 'dispatched',
+          dispatch_time: dispatchTime,
+        };
+      });
 
       res.json({
         success: true,
@@ -434,26 +627,62 @@ const ordersController = {
   async updateDeliveryStatus(req, res) {
     try {
       const { orderId } = req.params;
-      const { status, notes } = req.body;
+      // Accept reason (failure reason) and notes in addition to status
+      const { status, notes, reason } = req.body;
 
       const validStatuses = ['pending', 'assigned', 'in_route', 'delivered', 'failed', 'returned'];
       if (!validStatuses.includes(status)) {
         return res.status(400).json({ success: false, message: 'Status must be one of: ' + validStatuses.join(', ') });
       }
 
-      console.log('Updating order ' + orderId + ' status to: ' + status);
+      console.log('Updating order ' + orderId + ' status to: ' + status + (reason ? ' (reason: ' + reason + ')' : ''));
       const supabase = getSupabase();
+
+      // Track order details for possible WooCommerce sync-back
+      let orderRecord = inMemoryOrders.get(orderId);
 
       if (supabase) {
         const updateData = { status, updated_at: new Date().toISOString() };
         if (status === 'delivered') updateData.delivered_at = new Date().toISOString();
         if (notes) updateData.delivery_notes = notes;
+        if (reason) updateData.failure_reason = reason;
 
-        const { error } = await supabase.from('orders').update(updateData).eq('id', orderId).select();
-        if (error) console.error('Error updating order in database:', error);
+        const { data, error } = await supabase.from('orders').update(updateData).eq('id', orderId).select().single();
+        if (error) {
+          console.error('Error updating order in database:', error);
+        } else {
+          orderRecord = data;
+        }
       }
 
+      // Update in-memory store
       orderStatusMap.set(orderId, status);
+      if (orderRecord) {
+        inMemoryOrders.set(orderId, {
+          ...orderRecord,
+          status,
+          delivery_notes: notes || orderRecord.delivery_notes,
+          failure_reason: reason || orderRecord.failure_reason,
+        });
+      }
+
+      // ── WooCommerce sync-back ────────────────────────────────────────────────
+      // When a delivery is confirmed or failed, push the status update back to
+      // the originating WooCommerce store so the store owner is kept in sync.
+      if (['delivered', 'failed'].includes(status)) {
+        try {
+          const wooService = require('../services/woocommerce');
+          const record = orderRecord || (inMemoryOrders ? inMemoryOrders.get(orderId) : null);
+          if (record && record.wc_order_id && record.store_id) {
+            const wcStatus = status === 'delivered' ? 'completed' : 'failed';
+            await wooService.updateOrderStatus(record.store_id, record.wc_order_id, wcStatus, { notes, reason });
+            console.log(`WooCommerce sync-back: order ${record.wc_order_id} -> ${wcStatus}`);
+          }
+        } catch (wcErr) {
+          // Non-fatal: log but don't fail the request
+          console.warn('WooCommerce sync-back failed (non-fatal):', wcErr.message);
+        }
+      }
 
       // Calculate route progress
       let routeProgress = null;
@@ -478,6 +707,7 @@ const ordersController = {
         order_id: orderId,
         status,
         notes: notes || null,
+        failure_reason: reason || null,
         timestamp: new Date().toISOString(),
         route_progress: routeProgress
       });
@@ -814,6 +1044,13 @@ const ordersController = {
         });
       }
 
+      // No Supabase — save to in-memory store so getEligibleOrders can serve them
+      validOrders.forEach((order) => {
+        const id = 'mem_' + crypto.randomUUID();
+        inMemoryOrders.set(id, { ...order, id });
+        orderStatusMap.set(id, 'pending');
+      });
+
       res.json({
         success: true,
         message: 'Successfully processed ' + validOrders.length + ' orders (database not configured)',
@@ -854,10 +1091,143 @@ const ordersController = {
 
       routeOrdersMap.clear();
       orderStatusMap.clear();
+      inMemoryOrders.clear();
       res.json({ success: true, message: 'Orders reset completed (database not configured)', deletedCount: 0 });
     } catch (error) {
       console.error('Reset orders error:', error);
       res.status(500).json({ success: false, message: 'Failed to reset orders', error: error.message });
+    }
+  },
+
+  // GET /api/orders/analytics
+  async getAnalytics(req, res) {
+    try {
+      const { date = new Date().toISOString().split('T')[0], range = 'today' } = req.query;
+      const supabase = getSupabase();
+
+      // Compute date range boundaries
+      const endDate = date;
+      let startDate = date;
+      if (range === 'week') {
+        const d = new Date(date);
+        d.setDate(d.getDate() - 6);
+        startDate = d.toISOString().split('T')[0];
+      } else if (range === 'month') {
+        const d = new Date(date);
+        d.setDate(d.getDate() - 29);
+        startDate = d.toISOString().split('T')[0];
+      }
+
+      let analytics = {
+        date,
+        range,
+        start_date: startDate,
+        end_date: endDate,
+        orders: { total: 0, delivered: 0, pending: 0, failed: 0, in_route: 0 },
+        routes: { total: 0, completed: 0, in_progress: 0, assigned: 0 },
+        drivers: { total: 0, active: 0, available_today: 0 },
+        performance: { total_distance_km: 0, total_fuel_cost: 0, avg_delivery_time_minutes: 0, success_rate: 0 },
+        driver_performance: []
+      };
+
+      if (supabase) {
+        try {
+          // Fetch orders and routes over the date range (drivers are always all-time)
+          const [ordersResult, driversResult, routesResult] = await Promise.all([
+            supabase.from('orders').select('id, status, driver_id')
+              .gte('delivery_date', startDate).lte('delivery_date', endDate),
+            supabase.from('drivers').select('id, is_active, is_available_today'),
+            supabase.from('routes').select('id, status, total_distance_km, estimated_fuel_cost, estimated_duration_minutes, driver_id')
+              .gte('delivery_date', startDate).lte('delivery_date', endDate)
+          ]);
+
+          const orders = ordersResult.data || [];
+          const drivers = driversResult.data || [];
+          const routes = routesResult.data || [];
+
+          analytics.orders.total = orders.length;
+          analytics.orders.delivered = orders.filter(o => o.status === 'delivered').length;
+          analytics.orders.pending = orders.filter(o => o.status === 'pending').length;
+          analytics.orders.failed = orders.filter(o => o.status === 'failed').length;
+          analytics.orders.in_route = orders.filter(o => o.status === 'in_route' || o.status === 'out_for_delivery').length;
+
+          analytics.routes.total = routes.length;
+          analytics.routes.completed = routes.filter(r => r.status === 'completed').length;
+          analytics.routes.in_progress = routes.filter(r => r.status === 'in_progress' || r.status === 'dispatched').length;
+          analytics.routes.assigned = routes.filter(r => r.status === 'assigned').length;
+
+          analytics.drivers.total = drivers.length;
+          analytics.drivers.active = drivers.filter(d => d.is_active).length;
+          analytics.drivers.available_today = drivers.filter(d => d.is_active && d.is_available_today).length;
+
+          analytics.performance.total_distance_km = Math.round(routes.reduce((s, r) => s + (r.total_distance_km || 0), 0) * 100) / 100;
+          analytics.performance.total_fuel_cost = Math.round(routes.reduce((s, r) => s + (r.estimated_fuel_cost || 0), 0) * 100) / 100;
+          analytics.performance.avg_delivery_time_minutes = routes.length > 0
+            ? Math.round(routes.reduce((s, r) => s + (r.estimated_duration_minutes || 0), 0) / routes.length)
+            : 0;
+          analytics.performance.success_rate = analytics.orders.total > 0
+            ? Math.round((analytics.orders.delivered / analytics.orders.total) * 100)
+            : 0;
+
+          // Per-driver performance
+          const driverMap = {};
+          routes.forEach(r => {
+            if (!r.driver_id) return;
+            if (!driverMap[r.driver_id]) {
+              driverMap[r.driver_id] = { driver_id: r.driver_id, routes: 0, distance_km: 0, fuel_cost: 0 };
+            }
+            driverMap[r.driver_id].routes += 1;
+            driverMap[r.driver_id].distance_km += r.total_distance_km || 0;
+            driverMap[r.driver_id].fuel_cost += r.estimated_fuel_cost || 0;
+          });
+          orders.forEach(o => {
+            if (!o.driver_id || !driverMap[o.driver_id]) return;
+            if (!driverMap[o.driver_id].delivered) driverMap[o.driver_id].delivered = 0;
+            if (!driverMap[o.driver_id].total_orders) driverMap[o.driver_id].total_orders = 0;
+            driverMap[o.driver_id].total_orders += 1;
+            if (o.status === 'delivered') driverMap[o.driver_id].delivered += 1;
+          });
+          analytics.driver_performance = Object.values(driverMap).map(d => ({
+            ...d,
+            distance_km: Math.round(d.distance_km * 100) / 100,
+            fuel_cost: Math.round(d.fuel_cost * 100) / 100,
+            success_rate: d.total_orders > 0 ? Math.round(((d.delivered || 0) / d.total_orders) * 100) : 0
+          }));
+
+          return res.json({ success: true, analytics });
+        } catch (dbError) {
+          console.error('Supabase analytics error, using in-memory fallback:', dbError.message);
+        }
+      }
+
+      // In-memory fallback using routeOrdersMap / orderStatusMap
+      let totalOrders = 0;
+      let deliveredOrders = 0;
+      let pendingOrders = 0;
+      let totalDistanceKm = 0;
+
+      for (const [, orders] of routeOrdersMap.entries()) {
+        totalOrders += orders.length;
+        orders.forEach(order => {
+          const status = orderStatusMap.get(order.id) || 'pending';
+          if (status === 'delivered') deliveredOrders += 1;
+          else pendingOrders += 1;
+        });
+        const metrics = calculateRealisticMetrics(orders.length);
+        totalDistanceKm += metrics.distance_km;
+      }
+
+      analytics.orders.total = totalOrders;
+      analytics.orders.delivered = deliveredOrders;
+      analytics.orders.pending = pendingOrders;
+      analytics.routes.total = routeOrdersMap.size;
+      analytics.performance.total_distance_km = Math.round(totalDistanceKm * 100) / 100;
+      analytics.performance.success_rate = totalOrders > 0 ? Math.round((deliveredOrders / totalOrders) * 100) : 0;
+
+      res.json({ success: true, analytics });
+    } catch (error) {
+      console.error('Analytics error:', error);
+      res.status(500).json({ success: false, message: 'Failed to fetch analytics', error: error.message });
     }
   },
 
