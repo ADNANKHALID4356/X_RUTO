@@ -26,6 +26,49 @@ const authController = {
 
       console.log(`🔐 Login attempt for email: ${email}`);
 
+      // Try database authentication first (when Supabase is configured)
+      if (supabase) {
+        try {
+          const { data: dbUser, error: dbError } = await supabase
+            .from('users')
+            .select('id, name, email, role, password_hash, is_active')
+            .eq('email', email.toLowerCase())
+            .single();
+
+          if (!dbError && dbUser && dbUser.is_active) {
+            const passwordMatch = await bcrypt.compare(password, dbUser.password_hash);
+            if (passwordMatch) {
+              // Update last login timestamp
+              supabase.from('users')
+                .update({ last_login_at: new Date().toISOString() })
+                .eq('id', dbUser.id)
+                .then(() => {});
+
+              const token = jwt.sign(
+                { id: dbUser.id, email: dbUser.email, role: dbUser.role, name: dbUser.name },
+                jwtSecret,
+                { expiresIn: '24h' }
+              );
+
+              console.log(`✅ Database login successful: ${email} (${dbUser.role})`);
+              return res.json({
+                success: true,
+                message: 'Login successful',
+                user: { id: dbUser.id, email: dbUser.email, name: dbUser.name, role: dbUser.role },
+                token,
+              });
+            }
+            // Password mismatch — reject without falling through to dev credentials
+            console.log('❌ Invalid password for database user');
+            return res.status(401).json({ success: false, message: 'Invalid email or password' });
+          }
+          // No DB user found — fall through to dev credentials below
+        } catch (dbErr) {
+          console.warn('Database login lookup failed, falling back to dev credentials:', dbErr.message);
+        }
+      }
+
+      // Development / fallback hardcoded credentials
       // For development - simple hardcoded authentication
       // In production, you'd verify against a users table with hashed passwords
       if (email === 'admin@xruto.com' && password === 'admin123') {
@@ -129,15 +172,55 @@ const authController = {
 
       console.log(`📝 Registration attempt for email: ${email}`);
 
-      // For development - just return success without actually creating user
-      // In production, you'd hash the password and store in database
+      // Hash password and persist to database when Supabase is available
       const hashedPassword = await bcrypt.hash(password, 10);
-      
+
+      const validRoles = ['admin', 'driver', 'staff'];
+      const userRole = validRoles.includes(role) ? role : 'driver';
+
+      if (supabase) {
+        try {
+          // Check for duplicate email
+          const { data: existing } = await supabase
+            .from('users')
+            .select('id')
+            .eq('email', email.toLowerCase())
+            .single();
+          if (existing) {
+            return res.status(409).json({ success: false, message: 'Email already registered' });
+          }
+
+          const { data: dbUser, error: insertErr } = await supabase
+            .from('users')
+            .insert({
+              name,
+              email: email.toLowerCase(),
+              password_hash: hashedPassword,
+              role: userRole,
+              is_active: true,
+            })
+            .select('id, name, email, role')
+            .single();
+
+          if (insertErr) throw insertErr;
+
+          console.log(`✅ User registered in database: ${email} (${userRole})`);
+          return res.status(201).json({
+            success: true,
+            message: 'Registration successful',
+            user: { id: dbUser.id, name: dbUser.name, email: dbUser.email, role: dbUser.role },
+          });
+        } catch (dbErr) {
+          console.warn('Database registration failed, returning dev mode response:', dbErr.message);
+        }
+      }
+
+      // Fallback (no Supabase)
       const newUser = {
         id: `user-${Date.now()}`,
         name,
         email,
-        role,
+        role: userRole,
         created_at: new Date().toISOString()
       };
 

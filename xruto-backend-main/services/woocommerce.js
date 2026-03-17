@@ -8,9 +8,40 @@ class WooCommerceService {
   }
 
   /**
+   * Load all stores from Supabase into the in-memory Map.
+   * Called once at server startup so registered stores survive restarts.
+   */
+  async initFromDatabase() {
+    const supabase = getSupabase();
+    if (!supabase) return;
+    try {
+      const { data: rows, error } = await supabase
+        .from('woocommerce_stores')
+        .select('*')
+        .eq('is_active', true);
+      if (error) throw error;
+      for (const row of rows || []) {
+        this.stores.set(row.store_id, {
+          storeId: row.store_id,
+          name: row.name || row.store_id,
+          baseUrl: row.url,
+          consumerKey: row.consumer_key,
+          consumerSecret: row.consumer_secret,
+          lastSyncAt: row.last_sync_at || null,
+          orderCount: row.order_count || 0,
+        });
+      }
+      console.log(`✅ Loaded ${this.stores.size} WooCommerce store(s) from database`);
+    } catch (err) {
+      console.warn('Could not load WooCommerce stores from database:', err.message);
+    }
+  }
+
+  /**
    * Register a WooCommerce store for order syncing.
+   * Persists to Supabase `woocommerce_stores` table when available.
    * @param {string} storeId - Unique identifier for this store
-   * @param {object} credentials - { url, consumerKey, consumerSecret }
+   * @param {object} credentials - { url, consumerKey, consumerSecret, name }
    */
   registerStore(storeId, credentials) {
     if (!credentials.url || !credentials.consumerKey || !credentials.consumerSecret) {
@@ -30,15 +61,46 @@ class WooCommerceService {
       orderCount: 0,
     });
 
+    // Persist to Supabase asynchronously (non-blocking)
+    const supabase = getSupabase();
+    if (supabase) {
+      supabase.from('woocommerce_stores').upsert({
+        store_id: storeId,
+        name: credentials.name || storeId,
+        url: baseUrl,
+        consumer_key: credentials.consumerKey,
+        consumer_secret: credentials.consumerSecret,
+        is_active: true,
+        updated_at: new Date().toISOString(),
+      }, { onConflict: 'store_id' }).then(({ error }) => {
+        if (error) console.warn(`Could not persist store ${storeId} to database:`, error.message);
+        else console.log(`✅ WooCommerce store persisted to database: ${storeId}`);
+      });
+    }
+
     console.log(`✅ WooCommerce store registered: ${storeId} (${baseUrl})`);
     return { success: true, storeId };
   }
 
   /**
    * Remove a registered store.
+   * Also marks it as inactive in Supabase when available.
    */
   removeStore(storeId) {
     const removed = this.stores.delete(storeId);
+
+    if (removed) {
+      const supabase = getSupabase();
+      if (supabase) {
+        supabase.from('woocommerce_stores')
+          .update({ is_active: false, updated_at: new Date().toISOString() })
+          .eq('store_id', storeId)
+          .then(({ error }) => {
+            if (error) console.warn(`Could not deactivate store ${storeId} in database:`, error.message);
+          });
+      }
+    }
+
     return { success: removed, storeId };
   }
 
@@ -200,6 +262,16 @@ class WooCommerceService {
 
       store.lastSyncAt = new Date().toISOString();
       store.orderCount = total;
+
+      // Update last_sync_at and order_count in Supabase
+      if (supabase) {
+        supabase.from('woocommerce_stores')
+          .update({ last_sync_at: store.lastSyncAt, order_count: total, updated_at: store.lastSyncAt })
+          .eq('store_id', storeId)
+          .then(({ error }) => {
+            if (error) console.warn(`Could not update sync metadata for ${storeId}:`, error.message);
+          });
+      }
 
       console.log(`✅ Synced ${insertedCount} new orders from ${storeId}`);
 

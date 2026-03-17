@@ -145,6 +145,16 @@ if (require.main === module) {
     console.log('   /api/orders/*   -> Orders, clustering, routing, dispatch');
     console.log('   /api/auth/*     -> Authentication');
     console.log('\n Your React frontend should now connect successfully!');
+
+    // Load WooCommerce stores from database after server starts
+    try {
+      const wooCommerceService = require('./services/woocommerce');
+      wooCommerceService.initFromDatabase().catch(err => {
+        console.warn('WooCommerce store init error (non-fatal):', err.message);
+      });
+    } catch (err) {
+      console.warn('WooCommerce service not available at startup:', err.message);
+    }
   });
 }
 

@@ -7,6 +7,11 @@ const orderStatusMap = new Map();
 // Key: order id (string), Value: order object
 const inMemoryOrders = new Map();
 
+// In-memory driver store used when Supabase is not configured.
+// Key: driver id (string), Value: driver object
+// Allows driver availability toggles to persist within a server session without a DB.
+const inMemoryDrivers = new Map();
+
 // In-memory settings store – used when Supabase is not configured.
 // Persists across requests so admin changes take effect immediately.
 const inMemorySettings = {
@@ -27,4 +32,4 @@ const inMemorySettings = {
   enable_real_time_tracking: false
 };
 
-module.exports = { routeOrdersMap, orderStatusMap, inMemoryOrders, inMemorySettings };
+module.exports = { routeOrdersMap, orderStatusMap, inMemoryOrders, inMemoryDrivers, inMemorySettings };

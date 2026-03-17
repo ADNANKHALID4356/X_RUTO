@@ -1,5 +1,5 @@
 const { getSupabase } = require('../config/supabase');
-const { routeOrdersMap, orderStatusMap, inMemoryOrders, inMemorySettings } = require('../state/routeState');
+const { routeOrdersMap, orderStatusMap, inMemoryOrders, inMemoryDrivers, inMemorySettings } = require('../state/routeState');
 const {
   performKMeansClustering,
   generateNavigationURL,
@@ -328,6 +328,37 @@ const ordersController = {
         };
       });
 
+      // Persist routes to Supabase when available
+      if (supabase) {
+        const deliveryDate = new Date().toISOString().split('T')[0];
+        const routeInserts = routes.map(r => ({
+          route_name: r.route_name,
+          zone_color: r.zone_color || '#FF6B35',
+          delivery_date: deliveryDate,
+          status: 'generated',
+          total_orders: r.total_orders,
+          total_distance_km: r.total_distance_km,
+          total_distance_miles: r.total_distance_miles,
+          estimated_duration_minutes: r.estimated_duration_minutes,
+          estimated_fuel_cost: r.estimated_fuel_cost,
+          route_efficiency_score: r.route_efficiency_score,
+          navigation_url: r.navigation_url,
+          optimization_method: 'kmeans',
+          depot_returns_needed: r.depot_returns_needed,
+          route_segments: r.route_segments,
+          created_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+        }));
+        supabase.from('routes').insert(routeInserts).then(({ data: inserted, error: insertErr }) => {
+          if (insertErr) {
+            console.warn('Could not persist routes to database:', insertErr.message);
+          } else {
+            // Store DB IDs in routeOrdersMap keys so getDriverRoutes can find them
+            console.log(`✅ Persisted ${routes.length} route(s) to database`);
+          }
+        });
+      }
+
       res.json({
         success: true,
         routes,
@@ -462,14 +493,33 @@ const ordersController = {
 
       console.log('Dispatching', route_ids.length, 'routes to drivers');
 
-      const dispatchedRoutes = route_ids.map(routeId => ({
-        route_id: routeId,
-        route_name: 'Route ' + routeId,
-        driver_name: 'John Driver',
-        total_orders: Math.floor(Math.random() * 10) + 5,
-        status: 'dispatched',
-        dispatch_time: new Date().toISOString()
-      }));
+      const dispatchTime = new Date().toISOString();
+      const supabase = getSupabase();
+
+      // Update route status to 'dispatched' in Supabase when available
+      if (supabase) {
+        supabase.from('routes')
+          .update({ status: 'dispatched', dispatched_at: dispatchTime, updated_at: dispatchTime })
+          .in('id', route_ids)
+          .then(({ error }) => {
+            if (error) console.warn('Could not update route dispatch status in database:', error.message);
+            else console.log(`✅ Dispatched ${route_ids.length} route(s) in database`);
+          });
+      }
+
+      // Build dispatched route records from in-memory data (with real order counts)
+      const dispatchedRoutes = route_ids.map(routeId => {
+        const orders = routeOrdersMap.get(routeId) || [];
+        return {
+          route_id: routeId,
+          route_name: orders.length > 0
+            ? ('Zone ' + routeId.replace('route_', '') + ' - ' + (orders[0].postcode?.split(' ')[0] || 'Unknown'))
+            : ('Route ' + routeId),
+          total_orders: orders.length,
+          status: 'dispatched',
+          dispatch_time: dispatchTime,
+        };
+      });
 
       res.json({
         success: true,

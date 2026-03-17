@@ -90,7 +90,9 @@ CREATE TABLE IF NOT EXISTS woocommerce_stores (
 CREATE TABLE IF NOT EXISTS orders (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   store_id VARCHAR(100),                             -- links to woocommerce_stores.store_id
-  woocommerce_order_id VARCHAR(100),                 -- original WooCommerce order ID
+  wc_order_id VARCHAR(100),                          -- original WooCommerce order ID
+  wc_status VARCHAR(50),                             -- WooCommerce order status (e.g. processing)
+  source VARCHAR(50) DEFAULT 'manual',               -- 'woocommerce', 'pdf', 'manual', etc.
   customer_name VARCHAR(255) NOT NULL,
   customer_email VARCHAR(255),
   customer_phone VARCHAR(30),
@@ -109,8 +111,11 @@ CREATE TABLE IF NOT EXISTS orders (
     'pending', 'confirmed', 'assigned', 'in_route', 'clustered',
     'dispatched', 'out_for_delivery', 'delivered', 'failed', 'returned'
   )),
+  delivery_status VARCHAR(30),                       -- driver-facing delivery status
+  failure_reason TEXT,                               -- reason when delivery fails
   route_id UUID,                                     -- set when assigned to a route
   driver_id UUID REFERENCES drivers(id) ON DELETE SET NULL,
+  sequence_number INTEGER,                           -- stop order within a route
   dispatched_at TIMESTAMPTZ,
   delivered_at TIMESTAMPTZ,
   delivery_attempt_count INTEGER NOT NULL DEFAULT 0,
@@ -124,6 +129,7 @@ CREATE INDEX IF NOT EXISTS idx_orders_status ON orders(status);
 CREATE INDEX IF NOT EXISTS idx_orders_postcode ON orders(postcode);
 CREATE INDEX IF NOT EXISTS idx_orders_store_id ON orders(store_id);
 CREATE INDEX IF NOT EXISTS idx_orders_driver_id ON orders(driver_id);
+CREATE INDEX IF NOT EXISTS idx_orders_wc_order_id ON orders(wc_order_id);
 
 -- =========================================================
 -- ROUTES TABLE
